@@ -1,9 +1,10 @@
 mod config;
 mod render;
 mod modules;
+mod icons;
 
 use config::Config;
-use modules::{clock::get_time_string, sysinfo::SysMonitor};
+use modules::{clock::get_time_string, sysinfo::{SysMonitor, SysStats}};
 use render::Renderer;
 
 use niri_ipc::{
@@ -31,6 +32,7 @@ use wayland_client::{
     protocol::{wl_output, wl_shm, wl_surface},
     Connection, QueueHandle,
 };
+
 use calloop::{EventLoop, channel::{channel as calloop_channel, Event as ChannelEvent}, timer::{Timer, TimeoutAction}};
 use calloop_wayland_source::WaylandSource;
 use std::time::Duration;
@@ -54,17 +56,33 @@ struct VitoBar {
     bot_surface:    Option<LayerSurface>,
     bot_pool:       Option<SlotPool>,
 
+    conn:           Connection,
     qh:             QueueHandle<Self>,
     width:          u32,
     scale:          u32,   // output scale factor (1 = normal, 2 = HiDPI)
     config:         Config,
     monitor:        SysMonitor,
+    stats:          SysStats,   // cached — refreshed by timer, not per-draw
     running:        bool,
     top_configured: bool,
     bot_configured: bool,
 
     // Live niri state — updated via EventStream, zero IPC calls per draw
-    niri_state:     EventStreamState,
+    niri_state:      EventStreamState,
+    // Windows in niri's visual order — kept as a Vec so we never lose the sequence.
+    // WorkspacesChanged gives the full ordered list; incremental events patch it in-place.
+    windows_ordered: Vec<niri_ipc::Window>,
+}
+
+/// Sort windows into L→R display order: by workspace index, then by column, then by tile within
+/// column. Uses `layout.pos_in_scrolling_layout` (column, tile), which niri 25.11+ provides.
+/// Windows without layout info (e.g. floating) sort to the end of their workspace.
+fn sort_windows_by_position(windows: &mut Vec<niri_ipc::Window>, ws_map: &HashMap<u64, u8>) {
+    windows.sort_by_key(|w| {
+        let ws_idx = w.workspace_id.and_then(|id| ws_map.get(&id)).copied().unwrap_or(u8::MAX);
+        let (col, tile) = w.layout.pos_in_scrolling_layout.unwrap_or((usize::MAX, usize::MAX));
+        (ws_idx, col, tile)
+    });
 }
 
 impl VitoBar {
@@ -153,7 +171,7 @@ impl VitoBar {
         r.draw_text(cfg_label, sx + (sw - stw) / 2.0, text_y, fsz, &self.config.colors.base03);
 
         // ── Status blocks (right-to-left) ────────────────────────────────────
-        let stats = self.monitor.refresh();
+        let stats = &self.stats;
         let time  = get_time_string();
         let gap   = 4.0 * sf;
         let mut rx = pw as f32 - 4.0 * sf;
@@ -169,13 +187,16 @@ impl VitoBar {
             }};
         }
 
-        status_block!(150.0, &time,                                      &self.config.colors.base07);
-        status_block!( 54.0, &format!("V:{:>3}%", stats.volume_pct),    &self.config.colors.base0c);
+        // Right-to-left: clock → vol → bat → brightness → cpu → ram
+        // Icons: fa-clock-o  fa-volume-up  fa-battery-full  fa-sun-o  fa-bolt  fa-database
+        status_block!(148.0, &format!("\u{f017} {}", time),                       &self.config.colors.base07);
+        status_block!( 62.0, &format!("\u{f028} {:>3}%",  stats.volume_pct),      &self.config.colors.base0c);
         if let Some(bat) = stats.battery_pct {
-            status_block!(56.0, &format!("B:{:>4.0}%", bat),            &self.config.colors.base0b);
+            status_block!(62.0, &format!("\u{f240} {:>3.0}%", bat),               &self.config.colors.base0b);
         }
-        status_block!( 56.0, &format!("L:{:>3}%", stats.brightness_pct), &self.config.colors.base0a);
-        status_block!( 62.0, &format!("C:{:>4.0}%", stats.cpu_pct),     &self.config.colors.base09);
+        status_block!( 62.0, &format!("\u{f185} {:>3}%",  stats.brightness_pct),  &self.config.colors.base0a);
+        status_block!( 62.0, &format!("\u{f0e7} {:>3.0}%", stats.cpu_pct),        &self.config.colors.base09);
+        status_block!( 70.0, &format!("\u{f1c0} {:.1}G",  stats.ram_gb),          &self.config.colors.base0d);
         let _ = rx;
 
         // ── Flush ────────────────────────────────────────────────────────────
@@ -187,6 +208,7 @@ impl VitoBar {
         surface.wl_surface().damage_buffer(0, 0, pw as i32, ph as i32);
         buffer.attach_to(surface.wl_surface()).expect("buffer attach");
         surface.commit();
+        self.conn.flush().ok();
     }
 
     fn draw_bot(&mut self, qh: &QueueHandle<Self>) {
@@ -221,32 +243,36 @@ impl VitoBar {
         let text_y    = pad + bh * 0.75;
         let badge_fsz = (fsz - sf).max(8.0 * sf);
 
-        // ── Windows (from cached EventStream state) ──────────────────────────
+        // ── Windows in niri's visual order, grouped by workspace ────────────────
         let ws_map: HashMap<u64, u8> = self.niri_state.workspaces.workspaces.values()
             .map(|w| (w.id, w.idx)).collect();
 
-        let mut windows: Vec<&niri_ipc::Window> =
-            self.niri_state.windows.windows.values().collect();
-        windows.sort_by(|a, b| {
-            b.is_focused.cmp(&a.is_focused).then_with(|| {
-                let ai = a.workspace_id.and_then(|id| ws_map.get(&id)).copied().unwrap_or(255);
-                let bi = b.workspace_id.and_then(|id| ws_map.get(&id)).copied().unwrap_or(255);
-                ai.cmp(&bi)
-            })
+        // windows_ordered is already normalized to L→R visual order per workspace
+        // (sorted + reversed at storage time in the WindowsChanged handler).
+        // A stable sort by workspace idx here groups workspaces correctly without
+        // disturbing the within-workspace order.
+        let mut windows: Vec<&niri_ipc::Window> = self.windows_ordered.iter().collect();
+        windows.sort_by_key(|w| {
+            w.workspace_id.and_then(|id| ws_map.get(&id)).copied().unwrap_or(255)
         });
 
         let mut tx = 4.0 * sf;
         for win in &windows {
-            let block_w = 130.0 * sf;
+            let block_w = 160.0 * sf;
             if tx + block_w > pw as f32 - 4.0 * sf { break; }
 
-            let (fill, outline) = if win.is_focused {
-                (&self.config.colors.base02, &self.config.colors.base0d)
+            let (fill, text_col) = if win.is_focused {
+                (&self.config.colors.base02, &self.config.colors.base07)
             } else {
-                (&self.config.colors.base01, &self.config.colors.base02)
+                (&self.config.colors.base01, &self.config.colors.base05)
+            };
+            let outline_col = if win.is_focused {
+                &self.config.colors.base0d
+            } else {
+                &self.config.colors.base02
             };
             r.draw_rect(tx, pad, block_w, bh, fill);
-            r.draw_rect_outline(tx, pad, block_w, bh, &outline.clone(), 1.5 * sf);
+            r.draw_rect_outline(tx, pad, block_w, bh, &outline_col.clone(), 1.5 * sf);
 
             // Workspace badge
             let bdg_x = tx + 3.0 * sf;
@@ -261,13 +287,37 @@ impl VitoBar {
             r.draw_text(&ws_str, bdg_x + (bdg_w - ws_tw) / 2.0,
                         bdg_y + bdg_h * 0.75, badge_fsz, &self.config.colors.base04);
 
-            // Icon placeholder
-            r.draw_rect(tx + 19.0 * sf, 5.0 * sf, 12.0 * sf, 12.0 * sf, &self.config.colors.base0d);
+            // ── App icon ────────────────────────────────────────────────────
+            let app_id       = win.app_id.as_deref().unwrap_or("unknown");
+            let icon_phys    = (14.0 * sf) as u32;
+            let icon_x_phys  = (tx + 19.0 * sf) as u32;
+            let icon_y_phys  = (pad + (bh - 14.0 * sf) / 2.0) as u32;
+            let icon_logical = 14.0 * sf;  // fixed advance width for either render path
 
-            // App name — truncated to fit remaining block width
-            let app_id = win.app_id.as_deref().unwrap_or("unknown");
-            let app_name = r.truncate_text(app_id, block_w - 39.0 * sf, fsz);
-            r.draw_text(&app_name, tx + 35.0 * sf, text_y, fsz, &self.config.colors.base05);
+            if let Some(rgba) = icons::load(app_id, icon_phys) {
+                r.draw_icon(icon_x_phys, icon_y_phys, icon_phys, &rgba);
+            } else {
+                // Nerd Font fallback
+                let glyph = app_icon(app_id);
+                let glyph_col = if win.is_focused {
+                    &self.config.colors.base0d
+                } else {
+                    &self.config.colors.base03
+                };
+                r.draw_text(glyph, tx + 19.0 * sf, text_y, fsz, &glyph_col.clone());
+            }
+
+            // ── Label: app_id - title (clipped, no "…") ─────────────────────
+            let title  = win.title.as_deref().unwrap_or("");
+            let label  = if title.is_empty() || title.eq_ignore_ascii_case(app_id) {
+                app_id.to_string()
+            } else {
+                format!("{} - {}", app_id, title)
+            };
+            let label_x = tx + 19.0 * sf + icon_logical + 3.0 * sf;
+            let avail_w = (block_w - (label_x - tx) - 4.0 * sf).max(0.0);
+            let clipped = r.clip_text(&label, avail_w, fsz);
+            r.draw_text(&clipped, label_x, text_y, fsz, &text_col.clone());
 
             tx += block_w + 4.0 * sf;
         }
@@ -280,6 +330,7 @@ impl VitoBar {
         surface.wl_surface().damage_buffer(0, 0, pw as i32, ph as i32);
         buffer.attach_to(surface.wl_surface()).expect("buffer attach");
         surface.commit();
+        self.conn.flush().ok();
     }
 }
 
@@ -351,6 +402,30 @@ delegate_layer!(VitoBar);
 delegate_shm!(VitoBar);
 delegate_registry!(VitoBar);
 
+fn app_icon(app_id: &str) -> &'static str {
+    let s = app_id.to_ascii_lowercase();
+    let s = s.as_str();
+    if s.contains("firefox") || s.contains("librewolf") { "\u{f269}" }        // nf-fa-firefox
+    else if s.contains("chromium") || s.contains("chrome") || s.contains("brave") { "\u{f268}" } // nf-fa-chrome
+    else if s.contains("foot") || s.contains("alacritty") || s.contains("kitty") ||
+            s.contains("wezterm") || s.contains("urxvt") || s.contains("xterm") { "\u{f120}" }   // nf-fa-terminal
+    else if s.contains("nvim") || s.contains("neovim") { "\u{e62b}" }         // nf-dev-vim
+    else if s.contains("vim") { "\u{e62b}" }
+    else if s.contains("emacs") { "\u{e632}" }                                 // nf-dev-gnu_emacs
+    else if s.contains("code") || s.contains("vscode") { "\u{e70c}" }         // nf-dev-visualstudio
+    else if s.contains("discord") { "\u{f392}" }                              // nf-fab-discord
+    else if s.contains("telegram") || s.contains("tdesktop") { "\u{f2c6}" }  // nf-fa-telegram
+    else if s.contains("slack") { "\u{f198}" }                                // nf-fa-slack
+    else if s.contains("spotify") { "\u{f1bc}" }                              // nf-fa-spotify
+    else if s.contains("mpv") || s.contains("vlc") { "\u{f03d}" }             // nf-fa-film
+    else if s.contains("gimp") || s.contains("inkscape") { "\u{f1fc}" }       // nf-fa-paint-brush
+    else if s.contains("thunar") || s.contains("nautilus") ||
+            s.contains("dolphin") || s.contains("nemo") { "\u{f07b}" }        // nf-fa-folder
+    else if s.contains("obsidian") { "\u{f1d8}" }                             // nf-fa-diamond
+    else if s.contains("steam") { "\u{f1b6}" }                                // nf-fa-steam
+    else { "\u{f2d0}" }                                                        // nf-fa-window-maximize
+}
+
 fn find_font() -> String {
     let out = std::process::Command::new("fc-match")
         .args(["JetBrainsMono Nerd Font Mono", "--format=%{file}"])
@@ -367,7 +442,8 @@ fn main() {
     log::info!("font loaded from: {}", font_path);
 
     let config  = Config::load();
-    let monitor = SysMonitor::new();
+    let mut monitor = SysMonitor::new();
+    let initial_stats = monitor.refresh();
 
     let conn = Connection::connect_to_env().expect("failed to connect to Wayland");
     let (globals, queue) = registry_queue_init::<VitoBar>(&conn).expect("failed to init registry");
@@ -403,14 +479,20 @@ fn main() {
 
     // ── Pre-populate niri state so first draw has real data ─────────────────
     let mut niri_state = EventStreamState::default();
-    if let Ok(s) = NiriSocket::connect() {
-        if let Ok((Ok(NiriResponse::Workspaces(ws)), _)) = s.send(NiriRequest::Workspaces) {
+    if let Ok(mut s) = NiriSocket::connect() {
+        if let Ok(Ok(NiriResponse::Workspaces(ws))) = s.send(NiriRequest::Workspaces) {
             niri_state.apply(NiriEvent::WorkspacesChanged { workspaces: ws });
         }
     }
-    if let Ok(s) = NiriSocket::connect() {
-        if let Ok((Ok(NiriResponse::Windows(wins)), _)) = s.send(NiriRequest::Windows) {
-            niri_state.apply(NiriEvent::WindowsChanged { windows: wins });
+    let mut windows_ordered: Vec<niri_ipc::Window> = Vec::new();
+    if let Ok(mut s) = NiriSocket::connect() {
+        if let Ok(Ok(NiriResponse::Windows(wins))) = s.send(NiriRequest::Windows) {
+            niri_state.apply(NiriEvent::WindowsChanged { windows: wins.clone() });
+            let ws_map: HashMap<u64, u8> = niri_state.workspaces.workspaces.values()
+                .map(|w| (w.id, w.idx)).collect();
+            let mut ordered = wins;
+            sort_windows_by_position(&mut ordered, &ws_map);
+            windows_ordered = ordered;
         }
     }
 
@@ -424,15 +506,18 @@ fn main() {
         top_pool:    None,
         bot_surface: Some(bot_surface),
         bot_pool:    None,
+        conn:        conn.clone(),
         qh:          qh.clone(),
         width:       1920,
         scale:       1,
         config,
         monitor,
+        stats:       initial_stats,
         running:     true,
         top_configured: false,
         bot_configured: false,
         niri_state,
+        windows_ordered,
     };
 
     // ── Event loop ───────────────────────────────────────────────────────────
@@ -446,26 +531,90 @@ fn main() {
     let (niri_tx, niri_rx) = calloop_channel::<NiriEvent>();
     std::thread::spawn(move || {
         loop {
-            match NiriSocket::connect().and_then(|s| s.send(NiriRequest::EventStream)) {
-                Ok((Ok(_), mut read_event)) => {
+            let result = NiriSocket::connect().and_then(|mut s| {
+                let _ = s.send(NiriRequest::EventStream)?;
+                Ok(s.read_events())
+            });
+            match result {
+                Ok(mut read_event) => {
                     log::info!("niri: event stream connected");
                     loop {
                         match read_event() {
-                            Ok(ev)  => { if niri_tx.send(ev).is_err() { return; } }
-                            Err(e)  => { log::warn!("niri stream: {e}"); break; }
+                            Ok(ev) => { if niri_tx.send(ev).is_err() { return; } }
+                            Err(e) if e.kind() == std::io::ErrorKind::InvalidData => {
+                                // Unknown/future niri event type — skip it, keep reading.
+                                log::debug!("niri: skipping unknown event: {e}");
+                            }
+                            Err(e) => {
+                                // Real socket error — reconnect.
+                                log::warn!("niri stream: {e}");
+                                break;
+                            }
                         }
                     }
                 }
-                Ok((Err(e), _)) => log::warn!("niri: {e}"),
-                Err(e)          => log::warn!("niri connect: {e}"),
+                Err(e) => log::warn!("niri connect: {e}"),
             }
-            std::thread::sleep(Duration::from_secs(2)); // reconnect delay
+            std::thread::sleep(Duration::from_millis(500));
         }
     });
 
     event_loop.handle()
         .insert_source(niri_rx, |ev, _, app: &mut VitoBar| {
             let ChannelEvent::Msg(event) = ev else { return; };
+
+            // Keep windows_ordered in sync in L→R visual order.
+            // WindowsChanged gives the authoritative list; WindowLayoutsChanged fires when columns
+            // are moved left/right and carries updated pos_in_scrolling_layout for each window.
+            match &event {
+                NiriEvent::WindowsChanged { windows } => {
+                    // ws_map must be built before niri_state.apply() mutates workspaces
+                    let ws_map: HashMap<u64, u8> = app.niri_state.workspaces.workspaces.values()
+                        .map(|w| (w.id, w.idx)).collect();
+                    let mut ordered = windows.clone();
+                    sort_windows_by_position(&mut ordered, &ws_map);
+                    app.windows_ordered = ordered;
+                }
+                NiriEvent::WindowLayoutsChanged { changes } => {
+                    // Update each window's layout, then re-sort to reflect the new column order.
+                    for (id, layout) in changes {
+                        if let Some(w) = app.windows_ordered.iter_mut().find(|w| w.id == *id) {
+                            w.layout = layout.clone();
+                        }
+                    }
+                    let ws_map: HashMap<u64, u8> = app.niri_state.workspaces.workspaces.values()
+                        .map(|w| (w.id, w.idx)).collect();
+                    sort_windows_by_position(&mut app.windows_ordered, &ws_map);
+                }
+                NiriEvent::WindowOpenedOrChanged { window } => {
+                    if let Some(pos) = app.windows_ordered.iter().position(|w| w.id == window.id) {
+                        app.windows_ordered[pos] = window.clone();
+                    } else {
+                        app.windows_ordered.push(window.clone());
+                        let ws_map: HashMap<u64, u8> = app.niri_state.workspaces.workspaces.values()
+                            .map(|w| (w.id, w.idx)).collect();
+                        sort_windows_by_position(&mut app.windows_ordered, &ws_map);
+                    }
+                    // Ensure at most one window is focused at a time
+                    if window.is_focused {
+                        let focused_id = window.id;
+                        for w in &mut app.windows_ordered {
+                            if w.id != focused_id { w.is_focused = false; }
+                        }
+                    }
+                }
+                NiriEvent::WindowClosed { id } => {
+                    app.windows_ordered.retain(|w| w.id != *id);
+                }
+                NiriEvent::WindowFocusChanged { id } => {
+                    let focused = *id;
+                    for w in &mut app.windows_ordered {
+                        w.is_focused = Some(w.id) == focused;
+                    }
+                }
+                _ => {}
+            }
+
             let redraw_top = matches!(event,
                 NiriEvent::WorkspacesChanged { .. }        |
                 NiriEvent::WorkspaceActivated { .. }       |
@@ -473,14 +622,15 @@ fn main() {
             );
             let redraw_bot = matches!(event,
                 NiriEvent::WindowsChanged { .. }           |
+                NiriEvent::WindowLayoutsChanged { .. }     |
                 NiriEvent::WindowOpenedOrChanged { .. }    |
                 NiriEvent::WindowClosed { .. }             |
                 NiriEvent::WindowFocusChanged { .. }
             );
             app.niri_state.apply(event);
             let qh = app.qh.clone();
-            if redraw_top || redraw_bot { app.draw_top(&qh); }
-            if redraw_bot               { app.draw_bot(&qh); }
+            if redraw_top { app.draw_top(&qh); }
+            if redraw_bot { app.draw_bot(&qh); }
         })
         .expect("niri channel");
 
@@ -491,6 +641,7 @@ fn main() {
         .insert_source(
             Timer::from_duration(Duration::from_secs(5)),
             |_, _, app: &mut VitoBar| {
+                app.stats = app.monitor.refresh();
                 let qh = app.qh.clone();
                 app.draw_top(&qh);
                 TimeoutAction::ToDuration(Duration::from_secs(5))

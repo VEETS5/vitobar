@@ -2,10 +2,11 @@ use sysinfo::{System};
 
 #[derive(Debug, Clone)]
 pub struct SysStats {
-    pub cpu_pct:     f32,
-    pub battery_pct: Option<f32>,
-    pub volume_pct:  u32,
+    pub cpu_pct:        f32,
+    pub battery_pct:    Option<f32>,
+    pub volume_pct:     u32,
     pub brightness_pct: u32,
+    pub ram_gb:         f32,   // used RAM in GiB
 }
 
 pub struct SysMonitor {
@@ -21,13 +22,16 @@ impl SysMonitor {
 
     pub fn refresh(&mut self) -> SysStats {
         self.sys.refresh_cpu_usage();
-        
-        let cpu_pct = self.sys.cpus().iter().map(|c| c.cpu_usage()).sum::<f32>() / self.sys.cpus().len() as f32;
-        let battery_pct = get_battery();
-        let volume_pct  = get_volume();
+        self.sys.refresh_memory();
+
+        let cpu_pct = self.sys.cpus().iter().map(|c| c.cpu_usage()).sum::<f32>()
+            / self.sys.cpus().len() as f32;
+        let ram_gb         = self.sys.used_memory() as f32 / 1_073_741_824.0;
+        let battery_pct    = get_battery();
+        let volume_pct     = get_volume();
         let brightness_pct = get_brightness();
 
-        SysStats { cpu_pct, battery_pct, volume_pct, brightness_pct }
+        SysStats { cpu_pct, battery_pct, volume_pct, brightness_pct, ram_gb }
     }
 }
 

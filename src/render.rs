@@ -1,10 +1,30 @@
 use tiny_skia::{Color, Paint, PathBuilder, Pixmap, Rect, Stroke, Transform};
 
 use crate::config::hex_to_rgba;
-use fontdue::{Font, FontSettings};
+use fontdue::{Font, FontSettings, Metrics};
+use std::collections::HashMap;
 use std::sync::OnceLock;
+use std::cell::RefCell;
 
 static FONT: OnceLock<Font> = OnceLock::new();
+
+// Per-thread glyph cache: (char, size_bits) → (Metrics, bitmap)
+thread_local! {
+    static GLYPH_CACHE: RefCell<HashMap<(char, u32), (Metrics, Vec<u8>)>> = RefCell::new(HashMap::new());
+}
+
+fn rasterize_cached(ch: char, size: f32) -> (Metrics, Vec<u8>) {
+    let key = (ch, size.to_bits());
+    GLYPH_CACHE.with(|cache| {
+        let mut map = cache.borrow_mut();
+        if let Some(entry) = map.get(&key) {
+            return entry.clone();
+        }
+        let result = get_font().rasterize(ch, size);
+        map.insert(key, result.clone());
+        result
+    })
+}
 
 pub fn load_font(path: &str) {
     let bytes = std::fs::read(path).expect("failed to read font");
@@ -88,12 +108,11 @@ impl Renderer {
     /// Each glyph bitmap row 0 is the topmost row, placed at
     ///   screen_y = baseline - ymin - height
     pub fn draw_text(&mut self, text: &str, x: f32, y: f32, size: f32, color_hex: &str) {
-        let font = get_font();
         let (r, g, b, _) = hex_to_rgba(color_hex);
         let mut cx = x;
 
         for ch in text.chars() {
-            let (metrics, bitmap) = font.rasterize(ch, size);
+            let (metrics, bitmap) = rasterize_cached(ch, size);
 
             // Top-left of the bitmap in screen coordinates.
             let top_y  = y as i32 - metrics.ymin as i32 - metrics.height as i32;
@@ -127,7 +146,45 @@ impl Renderer {
     /// Returns the total advance width of `text` at `size` px.
     pub fn measure_text(&self, text: &str, size: f32) -> f32 {
         let font = get_font();
-        text.chars().map(|ch| font.rasterize(ch, size).0.advance_width).sum()
+        text.chars().map(|ch| font.metrics(ch, size).advance_width).sum()
+    }
+
+    /// Returns only the chars of `text` that fit within `max_width` — no "…" appended.
+    pub fn clip_text(&self, text: &str, max_width: f32, size: f32) -> String {
+        let font = get_font();
+        let mut out = String::new();
+        let mut used = 0.0f32;
+        for ch in text.chars() {
+            let cw = font.metrics(ch, size).advance_width;
+            if used + cw > max_width { break; }
+            out.push(ch);
+            used += cw;
+        }
+        out
+    }
+
+    /// Blit a `phys_size × phys_size` RGBA icon at physical pixel position (x, y).
+    pub fn draw_icon(&mut self, x: u32, y: u32, phys_size: u32, rgba: &[u8]) {
+        for row in 0..phys_size {
+            for col in 0..phys_size {
+                let px = x + col;
+                let py = y + row;
+                if px >= self.pixmap.width() || py >= self.pixmap.height() { continue; }
+                let si = ((row * phys_size + col) * 4) as usize;
+                if si + 3 >= rgba.len() { continue; }
+                let a = rgba[si + 3] as f32 / 255.0;
+                if a < 0.004 { continue; }
+                let ir = rgba[si]     as f32;
+                let ig = rgba[si + 1] as f32;
+                let ib = rgba[si + 2] as f32;
+                let di = (py * self.pixmap.width() + px) as usize * 4;
+                let data = self.pixmap.data_mut();
+                data[di]     = (ir * a + data[di]     as f32 * (1.0 - a)) as u8;
+                data[di + 1] = (ig * a + data[di + 1] as f32 * (1.0 - a)) as u8;
+                data[di + 2] = (ib * a + data[di + 2] as f32 * (1.0 - a)) as u8;
+                data[di + 3] = 255;
+            }
+        }
     }
 
     /// Truncates `text` so it fits within `max_width` px, appending "..." if needed.
@@ -136,12 +193,12 @@ impl Renderer {
             return text.to_string();
         }
         let font    = get_font();
-        let dot_w   = font.rasterize('.', size).0.advance_width;
+        let dot_w   = font.metrics('.', size).advance_width;
         let dots_w  = dot_w * 3.0;
         let mut out = String::new();
         let mut used = 0.0f32;
         for ch in text.chars() {
-            let cw = font.rasterize(ch, size).0.advance_width;
+            let cw = font.metrics(ch, size).advance_width;
             if used + cw + dots_w > max_width { break; }
             out.push(ch);
             used += cw;

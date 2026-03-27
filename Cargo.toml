@@ -18,7 +18,7 @@ wayland-protocols-wlr   = { version = "0.3", features = ["client"] }
 tiny-skia = "0.11"
 
 # Niri IPC — workspaces + window list
-niri-ipc = "0.1"
+niri-ipc = "25.11"
 
 # System info
 sysinfo = "0.30"
@@ -41,3 +41,6 @@ env_logger  = "0.11"
 
 # Font rendering
 fontdue = "0.9"
+
+# PNG decoding (app icons)
+png = "0.17"
