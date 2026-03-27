@@ -3,16 +3,17 @@ mod render;
 mod modules;
 
 use config::Config;
-use modules::{
-    clock::get_time_string,
-    sysinfo::SysMonitor,
-    windows::get_windows,
-    workspaces::get_workspaces,
-};
+use modules::{clock::get_time_string, sysinfo::SysMonitor};
 use render::Renderer;
 
-use smithay_client_toolkit::shell::WaylandSurface;
+use niri_ipc::{
+    Event as NiriEvent, Request as NiriRequest, Response as NiriResponse,
+    socket::Socket as NiriSocket,
+    state::{EventStreamState, EventStreamStatePart},
+};
+use std::collections::HashMap;
 
+use smithay_client_toolkit::shell::WaylandSurface;
 use smithay_client_toolkit::{
     compositor::{CompositorHandler, CompositorState},
     delegate_compositor, delegate_layer, delegate_output, delegate_registry, delegate_shm,
@@ -30,7 +31,7 @@ use wayland_client::{
     protocol::{wl_output, wl_shm, wl_surface},
     Connection, QueueHandle,
 };
-use calloop::{EventLoop, timer::{Timer, TimeoutAction}};
+use calloop::{EventLoop, channel::{channel as calloop_channel, Event as ChannelEvent}, timer::{Timer, TimeoutAction}};
 use calloop_wayland_source::WaylandSource;
 use std::time::Duration;
 
@@ -61,6 +62,9 @@ struct VitoBar {
     running:        bool,
     top_configured: bool,
     bot_configured: bool,
+
+    // Live niri state — updated via EventStream, zero IPC calls per draw
+    niri_state:     EventStreamState,
 }
 
 impl VitoBar {
@@ -96,14 +100,18 @@ impl VitoBar {
         let bh     = 18.0 * sf; // box height inside bar
         let text_y = pad + bh * 0.75; // baseline
 
-        // ── Workspaces ───────────────────────────────────────────────────────
-        let workspaces = get_workspaces();
-        let bsz = 18.0 * sf; // workspace box size
+        // ── Workspaces (from cached EventStream state, no IPC per frame) ───
+        let mut workspaces: Vec<&niri_ipc::Workspace> =
+            self.niri_state.workspaces.workspaces.values().collect();
+        workspaces.sort_by_key(|w| w.idx);
+
+        let bsz = 18.0 * sf;
         let mut x = 4.0 * sf;
         for ws in &workspaces {
+            let has_windows = ws.active_window_id.is_some();
             let fill = if ws.is_active {
                 &self.config.colors.base0d
-            } else if ws.has_windows {
+            } else if has_windows {
                 &self.config.colors.base02
             } else {
                 &self.config.colors.base01
@@ -113,7 +121,7 @@ impl VitoBar {
 
             let text_color = if ws.is_active {
                 &self.config.colors.base00
-            } else if ws.has_windows {
+            } else if has_windows {
                 &self.config.colors.base05
             } else {
                 &self.config.colors.base03
@@ -213,8 +221,21 @@ impl VitoBar {
         let text_y    = pad + bh * 0.75;
         let badge_fsz = (fsz - sf).max(8.0 * sf);
 
-        let windows   = get_windows();
-        let mut tx    = 4.0 * sf;
+        // ── Windows (from cached EventStream state) ──────────────────────────
+        let ws_map: HashMap<u64, u8> = self.niri_state.workspaces.workspaces.values()
+            .map(|w| (w.id, w.idx)).collect();
+
+        let mut windows: Vec<&niri_ipc::Window> =
+            self.niri_state.windows.windows.values().collect();
+        windows.sort_by(|a, b| {
+            b.is_focused.cmp(&a.is_focused).then_with(|| {
+                let ai = a.workspace_id.and_then(|id| ws_map.get(&id)).copied().unwrap_or(255);
+                let bi = b.workspace_id.and_then(|id| ws_map.get(&id)).copied().unwrap_or(255);
+                ai.cmp(&bi)
+            })
+        });
+
+        let mut tx = 4.0 * sf;
         for win in &windows {
             let block_w = 130.0 * sf;
             if tx + block_w > pw as f32 - 4.0 * sf { break; }
@@ -234,7 +255,8 @@ impl VitoBar {
             let bdg_h = 12.0 * sf;
             r.draw_rect(bdg_x, bdg_y, bdg_w, bdg_h, &self.config.colors.base00);
             r.draw_rect_outline(bdg_x, bdg_y, bdg_w, bdg_h, &self.config.colors.base03.clone(), 1.0 * sf);
-            let ws_str = win.workspace_idx.to_string();
+            let ws_idx = win.workspace_id.and_then(|id| ws_map.get(&id)).copied().unwrap_or(0);
+            let ws_str = ws_idx.to_string();
             let ws_tw  = r.measure_text(&ws_str, badge_fsz);
             r.draw_text(&ws_str, bdg_x + (bdg_w - ws_tw) / 2.0,
                         bdg_y + bdg_h * 0.75, badge_fsz, &self.config.colors.base04);
@@ -243,8 +265,9 @@ impl VitoBar {
             r.draw_rect(tx + 19.0 * sf, 5.0 * sf, 12.0 * sf, 12.0 * sf, &self.config.colors.base0d);
 
             // App name — truncated to fit remaining block width
-            let app = r.truncate_text(&win.app_id, block_w - 39.0 * sf, fsz);
-            r.draw_text(&app, tx + 35.0 * sf, text_y, fsz, &self.config.colors.base05);
+            let app_id = win.app_id.as_deref().unwrap_or("unknown");
+            let app_name = r.truncate_text(app_id, block_w - 39.0 * sf, fsz);
+            r.draw_text(&app_name, tx + 35.0 * sf, text_y, fsz, &self.config.colors.base05);
 
             tx += block_w + 4.0 * sf;
         }
@@ -378,6 +401,19 @@ fn main() {
 
     let output_state = OutputState::new(&globals, &qh);
 
+    // ── Pre-populate niri state so first draw has real data ─────────────────
+    let mut niri_state = EventStreamState::default();
+    if let Ok(s) = NiriSocket::connect() {
+        if let Ok((Ok(NiriResponse::Workspaces(ws)), _)) = s.send(NiriRequest::Workspaces) {
+            niri_state.apply(NiriEvent::WorkspacesChanged { workspaces: ws });
+        }
+    }
+    if let Ok(s) = NiriSocket::connect() {
+        if let Ok((Ok(NiriResponse::Windows(wins)), _)) = s.send(NiriRequest::Windows) {
+            niri_state.apply(NiriEvent::WindowsChanged { windows: wins });
+        }
+    }
+
     let mut app = VitoBar {
         registry_state: RegistryState::new(&globals),
         output_state,
@@ -396,28 +432,71 @@ fn main() {
         running:     true,
         top_configured: false,
         bot_configured: false,
+        niri_state,
     };
 
-    // ── Event loop (calloop + 1 s redraw timer) ──────────────────────────────
+    // ── Event loop ───────────────────────────────────────────────────────────
     let mut event_loop: EventLoop<VitoBar> = EventLoop::try_new().expect("event loop");
 
-    // Wire the Wayland event queue into calloop
     WaylandSource::new(conn, queue)
         .insert(event_loop.handle())
-        .expect("failed to insert wayland source");
+        .expect("wayland source");
 
-    // Redraw every second so clock/stats stay live
+    // ── Niri EventStream — background thread pushes events, zero polling ─────
+    let (niri_tx, niri_rx) = calloop_channel::<NiriEvent>();
+    std::thread::spawn(move || {
+        loop {
+            match NiriSocket::connect().and_then(|s| s.send(NiriRequest::EventStream)) {
+                Ok((Ok(_), mut read_event)) => {
+                    log::info!("niri: event stream connected");
+                    loop {
+                        match read_event() {
+                            Ok(ev)  => { if niri_tx.send(ev).is_err() { return; } }
+                            Err(e)  => { log::warn!("niri stream: {e}"); break; }
+                        }
+                    }
+                }
+                Ok((Err(e), _)) => log::warn!("niri: {e}"),
+                Err(e)          => log::warn!("niri connect: {e}"),
+            }
+            std::thread::sleep(Duration::from_secs(2)); // reconnect delay
+        }
+    });
+
+    event_loop.handle()
+        .insert_source(niri_rx, |ev, _, app: &mut VitoBar| {
+            let ChannelEvent::Msg(event) = ev else { return; };
+            let redraw_top = matches!(event,
+                NiriEvent::WorkspacesChanged { .. }        |
+                NiriEvent::WorkspaceActivated { .. }       |
+                NiriEvent::WorkspaceActiveWindowChanged { .. }
+            );
+            let redraw_bot = matches!(event,
+                NiriEvent::WindowsChanged { .. }           |
+                NiriEvent::WindowOpenedOrChanged { .. }    |
+                NiriEvent::WindowClosed { .. }             |
+                NiriEvent::WindowFocusChanged { .. }
+            );
+            app.niri_state.apply(event);
+            let qh = app.qh.clone();
+            if redraw_top || redraw_bot { app.draw_top(&qh); }
+            if redraw_bot               { app.draw_bot(&qh); }
+        })
+        .expect("niri channel");
+
+    // ── Sysinfo + clock: redraw top every 5 s ───────────────────────────────
+    // Clock shows HH:MM so 5 s granularity is imperceptible.
+    // CPU/battery/brightness/volume change slowly; 5 s is plenty.
     event_loop.handle()
         .insert_source(
-            Timer::from_duration(Duration::from_secs(1)),
+            Timer::from_duration(Duration::from_secs(5)),
             |_, _, app: &mut VitoBar| {
                 let qh = app.qh.clone();
                 app.draw_top(&qh);
-                app.draw_bot(&qh);
-                TimeoutAction::ToDuration(Duration::from_secs(1))
+                TimeoutAction::ToDuration(Duration::from_secs(5))
             },
         )
-        .expect("failed to insert timer");
+        .expect("sysinfo timer");
 
     while app.running {
         event_loop.dispatch(None, &mut app).expect("dispatch failed");
