@@ -1,0 +1,10 @@
+/home/vito/.config/vitobar/target/debug/deps/wayland_protocols-98f8bde42bbc6720.d: /home/vito/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/wayland-protocols-0.32.11/src/lib.rs /home/vito/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/wayland-protocols-0.32.11/src/protocol_macro.rs /home/vito/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/wayland-protocols-0.32.11/src/ext.rs /home/vito/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/wayland-protocols-0.32.11/src/wp.rs /home/vito/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/wayland-protocols-0.32.11/src/xdg.rs /home/vito/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/wayland-protocols-0.32.11/src/xwayland.rs
+
+/home/vito/.config/vitobar/target/debug/deps/libwayland_protocols-98f8bde42bbc6720.rmeta: /home/vito/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/wayland-protocols-0.32.11/src/lib.rs /home/vito/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/wayland-protocols-0.32.11/src/protocol_macro.rs /home/vito/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/wayland-protocols-0.32.11/src/ext.rs /home/vito/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/wayland-protocols-0.32.11/src/wp.rs /home/vito/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/wayland-protocols-0.32.11/src/xdg.rs /home/vito/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/wayland-protocols-0.32.11/src/xwayland.rs
+
+/home/vito/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/wayland-protocols-0.32.11/src/lib.rs:
+/home/vito/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/wayland-protocols-0.32.11/src/protocol_macro.rs:
+/home/vito/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/wayland-protocols-0.32.11/src/ext.rs:
+/home/vito/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/wayland-protocols-0.32.11/src/wp.rs:
+/home/vito/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/wayland-protocols-0.32.11/src/xdg.rs:
+/home/vito/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/wayland-protocols-0.32.11/src/xwayland.rs:
