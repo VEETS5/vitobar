@@ -1,54 +1,38 @@
+use niri_ipc::{socket::Socket, Request, Response};
+
 /// Workspace state from Niri IPC
 #[derive(Debug, Clone)]
 pub struct Workspace {
-    pub id:        u64,
-    pub idx:       u8,   // 1-9
-    pub is_active: bool,
+    pub id:          u64,
+    pub idx:         u8,   // 1-based display index
+    pub is_active:   bool,
     pub has_windows: bool,
 }
 
 /// Fetches current workspace list from Niri via IPC socket.
 /// Returns sorted list by index.
 pub fn get_workspaces() -> Vec<Workspace> {
-    use std::io::{BufRead, BufReader, Write};
-    use std::os::unix::net::UnixStream;
-
-    let socket_path = match std::env::var("NIRI_SOCKET") {
-        Ok(p) => p,
-        Err(_) => {
-            log::warn!("NIRI_SOCKET not set");
-            return dummy_workspaces();
-        }
+    let socket = match Socket::connect() {
+        Ok(s)  => s,
+        Err(e) => { log::warn!("niri socket: {e}"); return dummy_workspaces(); }
     };
 
-    let mut stream = match UnixStream::connect(&socket_path) {
-        Ok(s) => s,
-        Err(e) => {
-            log::warn!("could not connect to niri socket: {}", e);
-            return dummy_workspaces();
+    match socket.send(Request::Workspaces) {
+        Ok((Ok(Response::Workspaces(ws)), _)) => {
+            let mut out: Vec<Workspace> = ws.into_iter().map(|w| Workspace {
+                id:          w.id,
+                idx:         w.idx,
+                is_active:   w.is_active,
+                // niri always sets active_window_id when a workspace has windows
+                has_windows: w.active_window_id.is_some(),
+            }).collect();
+            out.sort_by_key(|w| w.idx);
+            out
         }
-    };
-
-    // Send request
-    let request = r#"{"Workspaces":null}"#;
-    if stream.write_all(format!("{}\n", request).as_bytes()).is_err() {
-        return dummy_workspaces();
+        Ok((Err(e), _)) => { log::warn!("niri: {e}");     dummy_workspaces() }
+        Err(e)          => { log::warn!("niri IPC: {e}"); dummy_workspaces() }
+        _               =>                                 dummy_workspaces(),
     }
-
-    // Read response
-    let reader = BufReader::new(&stream);
-    let line = reader.lines().next();
-    match line {
-        Some(Ok(json)) => parse_workspaces(&json),
-        _ => dummy_workspaces(),
-    }
-}
-
-fn parse_workspaces(json: &str) -> Vec<Workspace> {
-    // Minimal JSON parsing — we'll use serde properly once types stabilize
-    // For now return dummy data so the bar compiles and renders
-    log::debug!("niri workspace response: {}", json);
-    dummy_workspaces()
 }
 
 fn dummy_workspaces() -> Vec<Workspace> {

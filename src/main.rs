@@ -30,6 +30,9 @@ use wayland_client::{
     protocol::{wl_output, wl_shm, wl_surface},
     Connection, QueueHandle,
 };
+use calloop::{EventLoop, timer::{Timer, TimeoutAction}};
+use calloop_wayland_source::WaylandSource;
+use std::time::Duration;
 
 const BAR_HEIGHT:     u32 = 22;
 const TASKBAR_HEIGHT: u32 = 22;
@@ -50,6 +53,7 @@ struct VitoBar {
     bot_surface:    Option<LayerSurface>,
     bot_pool:       Option<SlotPool>,
 
+    qh:             QueueHandle<Self>,
     width:          u32,
     scale:          u32,   // output scale factor (1 = normal, 2 = HiDPI)
     config:         Config,
@@ -121,14 +125,24 @@ impl VitoBar {
             x += 20.0 * sf;
         }
 
-        // ── Center: launcher + settings ──────────────────────────────────────
+        // ── Center: launcher (NixOS ) + settings () ─────────────────────
         let cx = pw as f32 / 2.0;
-        r.draw_rect(cx - 36.0 * sf, pad, 34.0 * sf, bh, &self.config.colors.base01);
-        r.draw_rect_outline(cx - 36.0 * sf, pad, 34.0 * sf, bh, &self.config.colors.base02.clone(), 1.5 * sf);
-        r.draw_rect(cx + 2.0 * sf, pad, 20.0 * sf, bh, &self.config.colors.base01);
-        r.draw_rect_outline(cx + 2.0 * sf, pad, 20.0 * sf, bh, &self.config.colors.base02.clone(), 1.5 * sf);
-        r.draw_text("/|\\^", cx - 32.0 * sf, text_y, fsz, &self.config.colors.base05);
-        r.draw_text("*",    cx +  6.0 * sf,  text_y, fsz, &self.config.colors.base05);
+        // Launcher block
+        let launch_label = "\u{f303}";  // nf-linux-nixos
+        let lw = 34.0 * sf;
+        let lx = cx - 36.0 * sf;
+        r.draw_rect(lx, pad, lw, bh, &self.config.colors.base01);
+        r.draw_rect_outline(lx, pad, lw, bh, &self.config.colors.base02.clone(), 1.5 * sf);
+        let ltw = r.measure_text(launch_label, fsz);
+        r.draw_text(launch_label, lx + (lw - ltw) / 2.0, text_y, fsz, &self.config.colors.base0d);
+        // Settings block
+        let cfg_label = "\u{f013}";     // nf-fa-cog ⚙
+        let sw = 20.0 * sf;
+        let sx = cx + 2.0 * sf;
+        r.draw_rect(sx, pad, sw, bh, &self.config.colors.base01);
+        r.draw_rect_outline(sx, pad, sw, bh, &self.config.colors.base02.clone(), 1.5 * sf);
+        let stw = r.measure_text(cfg_label, fsz);
+        r.draw_text(cfg_label, sx + (sw - stw) / 2.0, text_y, fsz, &self.config.colors.base03);
 
         // ── Status blocks (right-to-left) ────────────────────────────────────
         let stats = self.monitor.refresh();
@@ -253,10 +267,7 @@ impl CompositorHandler for VitoBar {
         self.scale = factor.max(1) as u32;
     }
     fn transform_changed(&mut self, _: &Connection, _: &QueueHandle<Self>, _: &wl_surface::WlSurface, _: wl_output::Transform) {}
-    fn frame(&mut self, _: &Connection, qh: &QueueHandle<Self>, _: &wl_surface::WlSurface, _: u32) {
-        self.draw_top(qh);
-        self.draw_bot(qh);
-    }
+    fn frame(&mut self, _: &Connection, _: &QueueHandle<Self>, _: &wl_surface::WlSurface, _: u32) {}
     fn surface_enter(&mut self, _: &Connection, _: &QueueHandle<Self>, _: &wl_surface::WlSurface, _: &wl_output::WlOutput) {}
     fn surface_leave(&mut self, _: &Connection, _: &QueueHandle<Self>, _: &wl_surface::WlSurface, _: &wl_output::WlOutput) {}
 }
@@ -336,7 +347,7 @@ fn main() {
     let monitor = SysMonitor::new();
 
     let conn = Connection::connect_to_env().expect("failed to connect to Wayland");
-    let (globals, mut queue) = registry_queue_init::<VitoBar>(&conn).expect("failed to init registry");
+    let (globals, queue) = registry_queue_init::<VitoBar>(&conn).expect("failed to init registry");
     let qh = queue.handle();
 
     let compositor  = CompositorState::bind(&globals, &qh).expect("compositor not available");
@@ -377,6 +388,7 @@ fn main() {
         top_pool:    None,
         bot_surface: Some(bot_surface),
         bot_pool:    None,
+        qh:          qh.clone(),
         width:       1920,
         scale:       1,
         config,
@@ -386,8 +398,28 @@ fn main() {
         bot_configured: false,
     };
 
-    // ── Event loop ──
+    // ── Event loop (calloop + 1 s redraw timer) ──────────────────────────────
+    let mut event_loop: EventLoop<VitoBar> = EventLoop::try_new().expect("event loop");
+
+    // Wire the Wayland event queue into calloop
+    WaylandSource::new(conn, queue)
+        .insert(event_loop.handle())
+        .expect("failed to insert wayland source");
+
+    // Redraw every second so clock/stats stay live
+    event_loop.handle()
+        .insert_source(
+            Timer::from_duration(Duration::from_secs(1)),
+            |_, _, app: &mut VitoBar| {
+                let qh = app.qh.clone();
+                app.draw_top(&qh);
+                app.draw_bot(&qh);
+                TimeoutAction::ToDuration(Duration::from_secs(1))
+            },
+        )
+        .expect("failed to insert timer");
+
     while app.running {
-        queue.blocking_dispatch(&mut app).expect("dispatch failed");
+        event_loop.dispatch(None, &mut app).expect("dispatch failed");
     }
 }
