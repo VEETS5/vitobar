@@ -7,6 +7,14 @@ edition = "2021"
 name = "vitobar"
 path = "src/main.rs"
 
+[[bin]]
+name = "vitobar-launcher"
+path = "src/launcher/main.rs"
+
+[[bin]]
+name = "vitobar-settings"
+path = "src/settings/main.rs"
+
 [dependencies]
 # Wayland layer shell surface
 smithay-client-toolkit = { version = "0.19", features = ["calloop"] }

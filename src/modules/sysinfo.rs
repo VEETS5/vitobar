@@ -1,4 +1,5 @@
 use sysinfo::{System};
+use super::bluetooth::{BluetoothState, get_bluetooth};
 
 #[derive(Debug, Clone)]
 pub struct SysStats {
@@ -7,6 +8,7 @@ pub struct SysStats {
     pub volume_pct:     u32,
     pub brightness_pct: u32,
     pub ram_gb:         f32,   // used RAM in GiB
+    pub bluetooth:      BluetoothState,
 }
 
 pub struct SysMonitor {
@@ -31,7 +33,8 @@ impl SysMonitor {
         let volume_pct     = get_volume();
         let brightness_pct = get_brightness();
 
-        SysStats { cpu_pct, battery_pct, volume_pct, brightness_pct, ram_gb }
+        let bluetooth = get_bluetooth();
+        SysStats { cpu_pct, battery_pct, volume_pct, brightness_pct, ram_gb, bluetooth }
     }
 }
 

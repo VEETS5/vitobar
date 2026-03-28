@@ -4,7 +4,11 @@ mod modules;
 mod icons;
 
 use config::Config;
-use modules::{clock::get_time_string, sysinfo::{SysMonitor, SysStats}};
+use modules::{
+    clock::get_time_string,
+    sysinfo::{SysMonitor, SysStats},
+    bluetooth::BluetoothStatus,
+};
 use render::Renderer;
 
 use niri_ipc::{
@@ -17,10 +21,15 @@ use std::collections::HashMap;
 use smithay_client_toolkit::shell::WaylandSurface;
 use smithay_client_toolkit::{
     compositor::{CompositorHandler, CompositorState},
-    delegate_compositor, delegate_layer, delegate_output, delegate_registry, delegate_shm,
+    delegate_compositor, delegate_layer, delegate_output, delegate_pointer,
+    delegate_registry, delegate_seat, delegate_shm,
     output::{OutputHandler, OutputState},
     registry::{ProvidesRegistryState, RegistryState},
     registry_handlers,
+    seat::{
+        Capability, SeatHandler, SeatState,
+        pointer::{PointerEvent, PointerEventKind, PointerHandler},
+    },
     shell::wlr_layer::{
         Anchor, KeyboardInteractivity, Layer, LayerShell, LayerShellHandler, LayerSurface,
         LayerSurfaceConfigure,
@@ -29,9 +38,50 @@ use smithay_client_toolkit::{
 };
 use wayland_client::{
     globals::registry_queue_init,
-    protocol::{wl_output, wl_shm, wl_surface},
+    protocol::{wl_output, wl_pointer, wl_seat, wl_shm, wl_surface},
     Connection, QueueHandle,
 };
+
+#[derive(Debug, Clone)]
+enum BarAction {
+    FocusWorkspace { id: u64 },
+    FocusWindow    { id: u64 },
+    Spawn          { cmd: &'static str },
+}
+
+#[derive(Debug, Clone)]
+struct HitRegion {
+    x: f32, y: f32, w: f32, h: f32,  // logical pixels
+    action: BarAction,
+}
+
+fn fire_action(action: BarAction) {
+    match action {
+        BarAction::FocusWorkspace { id } => {
+            std::thread::spawn(move || {
+                if let Ok(mut s) = NiriSocket::connect() {
+                    let _ = s.send(NiriRequest::Action(
+                        niri_ipc::Action::FocusWorkspace {
+                            reference: niri_ipc::WorkspaceReferenceArg::Id(id),
+                        },
+                    ));
+                }
+            });
+        }
+        BarAction::FocusWindow { id } => {
+            std::thread::spawn(move || {
+                if let Ok(mut s) = NiriSocket::connect() {
+                    let _ = s.send(NiriRequest::Action(
+                        niri_ipc::Action::FocusWindow { id },
+                    ));
+                }
+            });
+        }
+        BarAction::Spawn { cmd } => {
+            std::process::Command::new(cmd).spawn().ok();
+        }
+    }
+}
 
 use calloop::{EventLoop, channel::{channel as calloop_channel, Event as ChannelEvent}, timer::{Timer, TimeoutAction}};
 use calloop_wayland_source::WaylandSource;
@@ -72,6 +122,14 @@ struct VitoBar {
     // Windows in niri's visual order — kept as a Vec so we never lose the sequence.
     // WorkspacesChanged gives the full ordered list; incremental events patch it in-place.
     windows_ordered: Vec<niri_ipc::Window>,
+
+    // Seat / pointer input
+    seat_state:      SeatState,
+    pointer:         Option<wl_pointer::WlPointer>,
+    top_pointer_pos: (f64, f64),
+    bot_pointer_pos: (f64, f64),
+    top_hits:        Vec<HitRegion>,
+    bot_hits:        Vec<HitRegion>,
 }
 
 /// Sort windows into L→R display order: by workspace index, then by column, then by tile within
@@ -112,6 +170,8 @@ impl VitoBar {
         let mut r = Renderer::new(pw, ph);
         r.clear(&self.config.colors.base00);
 
+        let mut hits: Vec<HitRegion> = Vec::new();
+
         // All logical coordinates × sf → physical pixels.
         let fsz    = self.config.font_size.unwrap_or(11.0) * sf;
         let pad    = 2.0 * sf;
@@ -136,6 +196,10 @@ impl VitoBar {
             };
             r.draw_rect(x, pad, bsz, bsz, fill);
             r.draw_rect_outline(x, pad, bsz, bsz, &self.config.colors.base02.clone(), 1.5 * sf);
+            hits.push(HitRegion {
+                x: x / sf, y: 2.0, w: bsz / sf, h: 18.0,
+                action: BarAction::FocusWorkspace { id: ws.id },
+            });
 
             let text_color = if ws.is_active {
                 &self.config.colors.base00
@@ -153,6 +217,7 @@ impl VitoBar {
 
         // ── Center: launcher (NixOS ) + settings () ─────────────────────
         let cx = pw as f32 / 2.0;
+        let cx_log = width as f32 / 2.0;
         // Launcher block
         let launch_label = "\u{f303}";  // nf-linux-nixos
         let lw = 34.0 * sf;
@@ -161,6 +226,10 @@ impl VitoBar {
         r.draw_rect_outline(lx, pad, lw, bh, &self.config.colors.base02.clone(), 1.5 * sf);
         let ltw = r.measure_text(launch_label, fsz);
         r.draw_text(launch_label, lx + (lw - ltw) / 2.0, text_y, fsz, &self.config.colors.base0d);
+        hits.push(HitRegion {
+            x: cx_log - 36.0, y: 2.0, w: 34.0, h: 18.0,
+            action: BarAction::Spawn { cmd: "vitobar-launcher" },
+        });
         // Settings block
         let cfg_label = "\u{f013}";     // nf-fa-cog ⚙
         let sw = 20.0 * sf;
@@ -169,6 +238,10 @@ impl VitoBar {
         r.draw_rect_outline(sx, pad, sw, bh, &self.config.colors.base02.clone(), 1.5 * sf);
         let stw = r.measure_text(cfg_label, fsz);
         r.draw_text(cfg_label, sx + (sw - stw) / 2.0, text_y, fsz, &self.config.colors.base03);
+        hits.push(HitRegion {
+            x: cx_log + 2.0, y: 2.0, w: 20.0, h: 18.0,
+            action: BarAction::Spawn { cmd: "vitobar-settings" },
+        });
 
         // ── Status blocks (right-to-left) ────────────────────────────────────
         let stats = &self.stats;
@@ -177,27 +250,44 @@ impl VitoBar {
         let mut rx = pw as f32 - 4.0 * sf;
 
         macro_rules! status_block {
-            ($w:expr, $text:expr, $color:expr) => {{
+            ($w:expr, $text:expr, $color:expr, $cmd:expr) => {{
                 let bw = $w * sf;
                 rx -= bw;
                 r.draw_rect(rx, pad, bw, bh, &self.config.colors.base01);
                 r.draw_rect_outline(rx, pad, bw, bh, &self.config.colors.base02.clone(), 1.5 * sf);
                 r.draw_text($text, rx + 4.0 * sf, text_y, fsz, $color);
+                hits.push(HitRegion {
+                    x: rx / sf, y: 2.0, w: bw / sf, h: 18.0,
+                    action: BarAction::Spawn { cmd: $cmd },
+                });
                 rx -= gap;
             }};
         }
 
-        // Right-to-left: clock → vol → bat → brightness → cpu → ram
-        // Icons: fa-clock-o  fa-volume-up  fa-battery-full  fa-sun-o  fa-bolt  fa-database
-        status_block!(148.0, &format!("\u{f017} {}", time),                       &self.config.colors.base07);
-        status_block!( 62.0, &format!("\u{f028} {:>3}%",  stats.volume_pct),      &self.config.colors.base0c);
+        // Right-to-left: clock → vol → bat → brightness → cpu → bt → ram
+        status_block!(148.0, &format!("\u{f017} {}", time),                       &self.config.colors.base07, "vitobar-settings");
+        status_block!( 62.0, &format!("\u{f028} {:>3}%",  stats.volume_pct),      &self.config.colors.base0c, "vitobar-settings");
         if let Some(bat) = stats.battery_pct {
-            status_block!(62.0, &format!("\u{f240} {:>3.0}%", bat),               &self.config.colors.base0b);
+            status_block!(62.0, &format!("\u{f240} {:>3.0}%", bat),               &self.config.colors.base0b, "vitobar-settings");
         }
-        status_block!( 62.0, &format!("\u{f185} {:>3}%",  stats.brightness_pct),  &self.config.colors.base0a);
-        status_block!( 62.0, &format!("\u{f0e7} {:>3.0}%", stats.cpu_pct),        &self.config.colors.base09);
-        status_block!( 70.0, &format!("\u{f1c0} {:.1}G",  stats.ram_gb),          &self.config.colors.base0d);
+        status_block!( 62.0, &format!("\u{f185} {:>3}%",  stats.brightness_pct),  &self.config.colors.base0a, "vitobar-settings");
+        status_block!( 62.0, &format!("\u{f0e7} {:>3.0}%", stats.cpu_pct),        &self.config.colors.base09, "vitobar-settings");
+
+        // Bluetooth block
+        let (bt_text, bt_col) = match &stats.bluetooth.status {
+            BluetoothStatus::Off        => ("\u{f5b0} off".to_string(), self.config.colors.base03.clone()),
+            BluetoothStatus::OnNoDevice => ("\u{f294} on".to_string(),  self.config.colors.base0c.clone()),
+            BluetoothStatus::Connected { device_name } => {
+                let name = if device_name.len() > 6 { &device_name[..6] } else { device_name.as_str() };
+                (format!("\u{f294} {}", name), self.config.colors.base0b.clone())
+            }
+        };
+        status_block!(62.0, &bt_text, &bt_col, "blueman-manager");
+
+        status_block!( 70.0, &format!("\u{f1c0} {:.1}G",  stats.ram_gb),          &self.config.colors.base0d, "vitobar-settings");
         let _ = rx;
+
+        self.top_hits = hits;
 
         // ── Flush ────────────────────────────────────────────────────────────
         let bgra = r.as_bgra();
@@ -256,6 +346,7 @@ impl VitoBar {
             w.workspace_id.and_then(|id| ws_map.get(&id)).copied().unwrap_or(255)
         });
 
+        let mut hits: Vec<HitRegion> = Vec::new();
         let mut tx = 4.0 * sf;
         for win in &windows {
             let block_w = 160.0 * sf;
@@ -319,8 +410,14 @@ impl VitoBar {
             let clipped = r.clip_text(&label, avail_w, fsz);
             r.draw_text(&clipped, label_x, text_y, fsz, &text_col.clone());
 
+            hits.push(HitRegion {
+                x: tx / sf, y: 2.0, w: 160.0, h: 18.0,
+                action: BarAction::FocusWindow { id: win.id },
+            });
             tx += block_w + 4.0 * sf;
         }
+
+        self.bot_hits = hits;
 
         let bgra = r.as_bgra();
         let len = canvas.len().min(bgra.len());
@@ -391,15 +488,73 @@ impl ShmHandler for VitoBar {
     fn shm_state(&mut self) -> &mut Shm { &mut self.shm }
 }
 
+impl SeatHandler for VitoBar {
+    fn seat_state(&mut self) -> &mut SeatState { &mut self.seat_state }
+    fn new_seat(&mut self, _: &Connection, _: &QueueHandle<Self>, _: wl_seat::WlSeat) {}
+    fn new_capability(&mut self, _: &Connection, qh: &QueueHandle<Self>,
+                      seat: wl_seat::WlSeat, capability: Capability) {
+        if capability == Capability::Pointer && self.pointer.is_none() {
+            let ptr = self.seat_state.get_pointer(qh, &seat)
+                .expect("failed to create pointer");
+            self.pointer = Some(ptr);
+        }
+    }
+    fn remove_capability(&mut self, _: &Connection, _: &QueueHandle<Self>,
+                         _: wl_seat::WlSeat, capability: Capability) {
+        if capability == Capability::Pointer {
+            if let Some(p) = self.pointer.take() { p.release(); }
+        }
+    }
+    fn remove_seat(&mut self, _: &Connection, _: &QueueHandle<Self>, _: wl_seat::WlSeat) {}
+}
+
+impl PointerHandler for VitoBar {
+    fn pointer_frame(&mut self, _: &Connection, _: &QueueHandle<Self>,
+                     _: &wl_pointer::WlPointer, events: &[PointerEvent]) {
+        use PointerEventKind::*;
+        for event in events {
+            let is_top = self.top_surface.as_ref()
+                .map(|s| s.wl_surface() == &event.surface).unwrap_or(false);
+            let is_bot = self.bot_surface.as_ref()
+                .map(|s| s.wl_surface() == &event.surface).unwrap_or(false);
+
+            match &event.kind {
+                Motion { .. } => {
+                    if is_top { self.top_pointer_pos = event.position; }
+                    if is_bot { self.bot_pointer_pos = event.position; }
+                }
+                Press { button, .. } if *button == smithay_client_toolkit::seat::pointer::BTN_LEFT => {
+                    let (pos, hits) = if is_top {
+                        (self.top_pointer_pos, self.top_hits.clone())
+                    } else if is_bot {
+                        (self.bot_pointer_pos, self.bot_hits.clone())
+                    } else {
+                        continue;
+                    };
+                    let (lx, ly) = (pos.0 as f32, pos.1 as f32);
+                    if let Some(hit) = hits.iter().find(|h| {
+                        lx >= h.x && lx < h.x + h.w && ly >= h.y && ly < h.y + h.h
+                    }) {
+                        fire_action(hit.action.clone());
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+}
+
 impl ProvidesRegistryState for VitoBar {
     fn registry(&mut self) -> &mut RegistryState { &mut self.registry_state }
-    registry_handlers![OutputState];
+    registry_handlers![OutputState, SeatState];
 }
 
 delegate_compositor!(VitoBar);
 delegate_output!(VitoBar);
 delegate_layer!(VitoBar);
 delegate_shm!(VitoBar);
+delegate_seat!(VitoBar);
+delegate_pointer!(VitoBar);
 delegate_registry!(VitoBar);
 
 fn app_icon(app_id: &str) -> &'static str {
@@ -452,6 +607,7 @@ fn main() {
     let compositor  = CompositorState::bind(&globals, &qh).expect("compositor not available");
     let layer_shell = LayerShell::bind(&globals, &qh).expect("layer shell not available");
     let shm         = Shm::bind(&globals, &qh).expect("shm not available");
+    let seat_state  = SeatState::new(&globals, &qh);
 
     // ── Top bar surface ──
     let top_wl_surface = compositor.create_surface(&qh);
@@ -518,6 +674,12 @@ fn main() {
         bot_configured: false,
         niri_state,
         windows_ordered,
+        seat_state,
+        pointer:         None,
+        top_pointer_pos: (0.0, 0.0),
+        bot_pointer_pos: (0.0, 0.0),
+        top_hits:        Vec::new(),
+        bot_hits:        Vec::new(),
     };
 
     // ── Event loop ───────────────────────────────────────────────────────────
