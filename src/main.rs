@@ -218,28 +218,29 @@ impl VitoBar {
         // ── Center: launcher (NixOS ) + settings () ─────────────────────
         let cx = pw as f32 / 2.0;
         let cx_log = width as f32 / 2.0;
+        let icon_fsz = fsz * 1.5;  // larger size for status/center icons
         // Launcher block
-        let launch_label = "\u{f303}";  // nf-linux-nixos
-        let lw = 34.0 * sf;
-        let lx = cx - 36.0 * sf;
+        let launch_label = "\u{f313}";  // nf-linux-nixos
+        let lw = 36.0 * sf;
+        let lx = cx - 38.0 * sf;
         r.draw_rect(lx, pad, lw, bh, &self.config.colors.base01);
         r.draw_rect_outline(lx, pad, lw, bh, &self.config.colors.base02.clone(), 1.5 * sf);
-        let ltw = r.measure_text(launch_label, fsz);
-        r.draw_text(launch_label, lx + (lw - ltw) / 2.0, text_y, fsz, &self.config.colors.base0d);
+        let ltw = r.measure_text(launch_label, icon_fsz);
+        r.draw_text(launch_label, lx + (lw - ltw) / 2.0, pad + bh * 0.82, icon_fsz, &self.config.colors.base0d);
         hits.push(HitRegion {
-            x: cx_log - 36.0, y: 2.0, w: 34.0, h: 18.0,
+            x: cx_log - 38.0, y: 2.0, w: 36.0, h: 18.0,
             action: BarAction::Spawn { cmd: "vitolauncher" },
         });
         // Settings block
         let cfg_label = "\u{f013}";     // nf-fa-cog ⚙
-        let sw = 20.0 * sf;
+        let sw = 22.0 * sf;
         let sx = cx + 2.0 * sf;
         r.draw_rect(sx, pad, sw, bh, &self.config.colors.base01);
         r.draw_rect_outline(sx, pad, sw, bh, &self.config.colors.base02.clone(), 1.5 * sf);
-        let stw = r.measure_text(cfg_label, fsz);
-        r.draw_text(cfg_label, sx + (sw - stw) / 2.0, text_y, fsz, &self.config.colors.base0e);
+        let stw = r.measure_text(cfg_label, icon_fsz);
+        r.draw_text(cfg_label, sx + (sw - stw) / 2.0, pad + bh * 0.82, icon_fsz, &self.config.colors.base0e);
         hits.push(HitRegion {
-            x: cx_log + 2.0, y: 2.0, w: 20.0, h: 18.0,
+            x: cx_log + 2.0, y: 2.0, w: 22.0, h: 18.0,
             action: BarAction::Spawn { cmd: "vitosettings" },
         });
 
@@ -249,13 +250,18 @@ impl VitoBar {
         let gap   = 4.0 * sf;
         let mut rx = pw as f32 - 4.0 * sf;
 
+        // status_block!: icon glyph rendered at icon_fsz, text at fsz
         macro_rules! status_block {
-            ($w:expr, $text:expr, $color:expr, $cmd:expr) => {{
+            ($w:expr, $icon:expr, $text:expr, $color:expr, $cmd:expr) => {{
                 let bw = $w * sf;
                 rx -= bw;
                 r.draw_rect(rx, pad, bw, bh, &self.config.colors.base01);
                 r.draw_rect_outline(rx, pad, bw, bh, &self.config.colors.base02.clone(), 1.5 * sf);
-                r.draw_text($text, rx + 4.0 * sf, text_y, fsz, $color);
+                // icon at larger size
+                let iw = r.measure_text($icon, icon_fsz);
+                r.draw_text($icon, rx + 4.0 * sf, pad + bh * 0.82, icon_fsz, $color);
+                // label text beside icon
+                r.draw_text($text, rx + 4.0 * sf + iw + 2.0 * sf, text_y, fsz, $color);
                 hits.push(HitRegion {
                     x: rx / sf, y: 2.0, w: bw / sf, h: 18.0,
                     action: BarAction::Spawn { cmd: $cmd },
@@ -265,26 +271,26 @@ impl VitoBar {
         }
 
         // Right-to-left: clock → vol → bat → brightness → cpu → bt → ram
-        status_block!(148.0, &format!("\u{f017} {}", time),                       &self.config.colors.base07, "vitosettings");
-        status_block!( 62.0, &format!("\u{f028} {:>3}%",  stats.volume_pct),      &self.config.colors.base0c, "vitosettings");
+        status_block!(152.0, "\u{f017}", &format!(" {}", time),                      &self.config.colors.base07, "vitosettings");
+        status_block!( 68.0, "\u{f028}", &format!(" {:>3}%",  stats.volume_pct),     &self.config.colors.base0c, "vitosettings");
         if let Some(bat) = stats.battery_pct {
-            status_block!(62.0, &format!("\u{f240} {:>3.0}%", bat),               &self.config.colors.base0b, "vitosettings");
+            status_block!(68.0, "\u{f240}", &format!(" {:>3.0}%", bat),              &self.config.colors.base0b, "vitosettings");
         }
-        status_block!( 62.0, &format!("\u{f185} {:>3}%",  stats.brightness_pct),  &self.config.colors.base0a, "vitosettings");
-        status_block!( 62.0, &format!("\u{f0e7} {:>3.0}%", stats.cpu_pct),        &self.config.colors.base09, "vitosettings");
+        status_block!( 68.0, "\u{f185}", &format!(" {:>3}%",  stats.brightness_pct), &self.config.colors.base0a, "vitosettings");
+        status_block!( 68.0, "\u{f0e7}", &format!(" {:>3.0}%", stats.cpu_pct),       &self.config.colors.base09, "vitosettings");
 
         // Bluetooth block
-        let (bt_text, bt_col) = match &stats.bluetooth.status {
-            BluetoothStatus::Off        => ("\u{f294} off".to_string(), self.config.colors.base03.clone()),
-            BluetoothStatus::OnNoDevice => ("\u{f294} on".to_string(),  self.config.colors.base0c.clone()),
+        let (bt_icon, bt_text, bt_col) = match &stats.bluetooth.status {
+            BluetoothStatus::Off        => ("\u{f294}", " off".to_string(), self.config.colors.base03.clone()),
+            BluetoothStatus::OnNoDevice => ("\u{f294}", " on".to_string(),  self.config.colors.base0c.clone()),
             BluetoothStatus::Connected { device_name } => {
                 let name = if device_name.len() > 6 { &device_name[..6] } else { device_name.as_str() };
-                (format!("\u{f294} {}", name), self.config.colors.base0b.clone())
+                ("\u{f294}", format!(" {}", name), self.config.colors.base0b.clone())
             }
         };
-        status_block!(62.0, &bt_text, &bt_col, "blueman-manager");
+        status_block!(68.0, bt_icon, &bt_text, &bt_col, "blueman-manager");
 
-        status_block!( 70.0, &format!("\u{f1c0} {:.1}G",  stats.ram_gb),          &self.config.colors.base0d, "vitosettings");
+        status_block!( 74.0, "\u{f1c0}", &format!(" {:.1}G",  stats.ram_gb),         &self.config.colors.base0d, "vitosettings");
         let _ = rx;
 
         self.top_hits = hits;

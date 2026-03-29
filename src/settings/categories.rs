@@ -6,6 +6,7 @@ pub enum Category {
     Network,
     Power,
     NixOS,
+    System,
 }
 
 impl Category {
@@ -16,6 +17,7 @@ impl Category {
         Category::Network,
         Category::Power,
         Category::NixOS,
+        Category::System,
     ];
 
     pub fn label(&self) -> &'static str {
@@ -26,6 +28,7 @@ impl Category {
             Category::Network   => "\u{f1eb} Network",
             Category::Power     => "\u{f011} Power",
             Category::NixOS     => "\u{f313} NixOS",
+            Category::System    => "\u{f085} System",
         }
     }
 }
