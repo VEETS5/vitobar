@@ -122,6 +122,10 @@ impl LauncherApp {
         let mut r = Renderer::new(pw, ph);
         r.clear(&self.config.colors.base00);
 
+        // Window border
+        r.draw_rect_outline(0.0, 0.0, pw as f32, ph as f32,
+            &self.config.colors.base0d, 2.0 * sf);
+
         let fsz    = self.config.font_size.unwrap_or(11.0) * sf;
         let pad    = PADDING * sf;
         let sh     = SEARCH_H * sf;
@@ -301,7 +305,9 @@ impl KeyboardHandler for LauncherApp {
     fn enter(&mut self, _: &Connection, _: &QueueHandle<Self>, _: &wl_keyboard::WlKeyboard,
              _: &wl_surface::WlSurface, _: u32, _: &[u32], _: &[Keysym]) {}
     fn leave(&mut self, _: &Connection, _: &QueueHandle<Self>, _: &wl_keyboard::WlKeyboard,
-             _: &wl_surface::WlSurface, _: u32) {}
+             _: &wl_surface::WlSurface, _: u32) {
+        self.running = false;
+    }
     fn release_key(&mut self, _: &Connection, _: &QueueHandle<Self>, _: &wl_keyboard::WlKeyboard,
                    _: u32, _: KeyEvent) {}
     fn update_modifiers(&mut self, _: &Connection, _: &QueueHandle<Self>, _: &wl_keyboard::WlKeyboard,
@@ -359,6 +365,9 @@ impl PointerHandler for LauncherApp {
             match &event.kind {
                 Motion { .. } => {
                     self.pointer_pos = event.position;
+                }
+                Leave { .. } => {
+                    self.running = false;
                 }
                 Press { button, .. } if *button == BTN_LEFT => {
                     let (lx, ly) = (event.position.0 as f32, event.position.1 as f32);
@@ -423,7 +432,7 @@ fn main() {
 
     let wl_surface = compositor.create_surface(&qh);
     let surface = layer_shell.create_layer_surface(
-        &qh, wl_surface, Layer::Overlay, Some("vitobar-launcher"), None,
+        &qh, wl_surface, Layer::Overlay, Some("vitolauncher"), None,
     );
     surface.set_size(WIN_W, WIN_H);
     surface.set_anchor(Anchor::empty());   // centered

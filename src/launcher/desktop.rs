@@ -15,11 +15,24 @@ pub fn load_all() -> Vec<DesktopEntry> {
 
     let search_dirs: Vec<PathBuf> = {
         let home = std::env::var("HOME").unwrap_or_default();
-        vec![
-            PathBuf::from(format!("{}/.local/share/applications", home)),
-            PathBuf::from("/run/current-system/sw/share/applications"),
-            PathBuf::from("/usr/share/applications"),
-        ]
+
+        // XDG_DATA_HOME (default: ~/.local/share)
+        let data_home = std::env::var("XDG_DATA_HOME")
+            .unwrap_or_else(|_| format!("{}/.local/share", home));
+
+        // XDG_DATA_DIRS (nix sets this to include nix profile and system paths)
+        let data_dirs_str = std::env::var("XDG_DATA_DIRS")
+            .unwrap_or_else(|_| "/usr/local/share:/usr/share".to_string());
+
+        let mut dirs: Vec<PathBuf> = Vec::new();
+        dirs.push(PathBuf::from(&data_home).join("applications"));
+        for entry in data_dirs_str.split(':') {
+            let p = PathBuf::from(entry).join("applications");
+            if !dirs.contains(&p) {
+                dirs.push(p);
+            }
+        }
+        dirs
     };
 
     for dir in &search_dirs {

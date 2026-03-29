@@ -92,6 +92,10 @@ impl SettingsApp {
         let mut r = Renderer::new(pw, ph);
         r.clear(&self.config.colors.base00);
 
+        // Window border
+        r.draw_rect_outline(0.0, 0.0, pw as f32, ph as f32,
+            &self.config.colors.base0d, 2.0 * sf);
+
         let fsz = self.config.font_size.unwrap_or(11.0) * sf;
 
         // ── Sidebar ────────────────────────────────────────────────────────
@@ -103,9 +107,13 @@ impl SettingsApp {
             let rh = CAT_ROW_H * sf;
 
             if *cat == self.active_category {
+                // Active: filled base02, full base0d border, thick left accent strip
                 r.draw_rect(0.0, ry, sidebar_w, rh, &self.config.colors.base02);
-                // Left accent border
-                r.draw_rect(0.0, ry, 3.0 * sf, rh, &self.config.colors.base0d);
+                r.draw_rect_outline(0.0, ry, sidebar_w, rh, &self.config.colors.base0d, 1.5 * sf);
+                r.draw_rect(0.0, ry, 4.0 * sf, rh, &self.config.colors.base0d);
+            } else {
+                // Inactive: no fill, base02 border (90s panel style)
+                r.draw_rect_outline(0.0, ry, sidebar_w, rh, &self.config.colors.base02, 1.0 * sf);
             }
 
             let text_y = ry + rh * 0.65;
@@ -463,7 +471,7 @@ fn main() {
 
     let wl_surface = compositor.create_surface(&qh);
     let surface = layer_shell.create_layer_surface(
-        &qh, wl_surface, Layer::Overlay, Some("vitobar-settings"), None,
+        &qh, wl_surface, Layer::Overlay, Some("vitosettings"), None,
     );
     surface.set_size(WIN_W, WIN_H);
     surface.set_anchor(Anchor::empty());   // centered

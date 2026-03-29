@@ -228,7 +228,7 @@ impl VitoBar {
         r.draw_text(launch_label, lx + (lw - ltw) / 2.0, text_y, fsz, &self.config.colors.base0d);
         hits.push(HitRegion {
             x: cx_log - 36.0, y: 2.0, w: 34.0, h: 18.0,
-            action: BarAction::Spawn { cmd: "vitobar-launcher" },
+            action: BarAction::Spawn { cmd: "vitolauncher" },
         });
         // Settings block
         let cfg_label = "\u{f013}";     // nf-fa-cog ⚙
@@ -237,10 +237,10 @@ impl VitoBar {
         r.draw_rect(sx, pad, sw, bh, &self.config.colors.base01);
         r.draw_rect_outline(sx, pad, sw, bh, &self.config.colors.base02.clone(), 1.5 * sf);
         let stw = r.measure_text(cfg_label, fsz);
-        r.draw_text(cfg_label, sx + (sw - stw) / 2.0, text_y, fsz, &self.config.colors.base03);
+        r.draw_text(cfg_label, sx + (sw - stw) / 2.0, text_y, fsz, &self.config.colors.base0e);
         hits.push(HitRegion {
             x: cx_log + 2.0, y: 2.0, w: 20.0, h: 18.0,
-            action: BarAction::Spawn { cmd: "vitobar-settings" },
+            action: BarAction::Spawn { cmd: "vitosettings" },
         });
 
         // ── Status blocks (right-to-left) ────────────────────────────────────
@@ -265,17 +265,17 @@ impl VitoBar {
         }
 
         // Right-to-left: clock → vol → bat → brightness → cpu → bt → ram
-        status_block!(148.0, &format!("\u{f017} {}", time),                       &self.config.colors.base07, "vitobar-settings");
-        status_block!( 62.0, &format!("\u{f028} {:>3}%",  stats.volume_pct),      &self.config.colors.base0c, "vitobar-settings");
+        status_block!(148.0, &format!("\u{f017} {}", time),                       &self.config.colors.base07, "vitosettings");
+        status_block!( 62.0, &format!("\u{f028} {:>3}%",  stats.volume_pct),      &self.config.colors.base0c, "vitosettings");
         if let Some(bat) = stats.battery_pct {
-            status_block!(62.0, &format!("\u{f240} {:>3.0}%", bat),               &self.config.colors.base0b, "vitobar-settings");
+            status_block!(62.0, &format!("\u{f240} {:>3.0}%", bat),               &self.config.colors.base0b, "vitosettings");
         }
-        status_block!( 62.0, &format!("\u{f185} {:>3}%",  stats.brightness_pct),  &self.config.colors.base0a, "vitobar-settings");
-        status_block!( 62.0, &format!("\u{f0e7} {:>3.0}%", stats.cpu_pct),        &self.config.colors.base09, "vitobar-settings");
+        status_block!( 62.0, &format!("\u{f185} {:>3}%",  stats.brightness_pct),  &self.config.colors.base0a, "vitosettings");
+        status_block!( 62.0, &format!("\u{f0e7} {:>3.0}%", stats.cpu_pct),        &self.config.colors.base09, "vitosettings");
 
         // Bluetooth block
         let (bt_text, bt_col) = match &stats.bluetooth.status {
-            BluetoothStatus::Off        => ("\u{f5b0} off".to_string(), self.config.colors.base03.clone()),
+            BluetoothStatus::Off        => ("\u{f294} off".to_string(), self.config.colors.base03.clone()),
             BluetoothStatus::OnNoDevice => ("\u{f294} on".to_string(),  self.config.colors.base0c.clone()),
             BluetoothStatus::Connected { device_name } => {
                 let name = if device_name.len() > 6 { &device_name[..6] } else { device_name.as_str() };
@@ -284,7 +284,7 @@ impl VitoBar {
         };
         status_block!(62.0, &bt_text, &bt_col, "blueman-manager");
 
-        status_block!( 70.0, &format!("\u{f1c0} {:.1}G",  stats.ram_gb),          &self.config.colors.base0d, "vitobar-settings");
+        status_block!( 70.0, &format!("\u{f1c0} {:.1}G",  stats.ram_gb),          &self.config.colors.base0d, "vitosettings");
         let _ = rx;
 
         self.top_hits = hits;

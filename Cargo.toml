@@ -8,11 +8,11 @@ name = "vitobar"
 path = "src/main.rs"
 
 [[bin]]
-name = "vitobar-launcher"
+name = "vitolauncher"
 path = "src/launcher/main.rs"
 
 [[bin]]
-name = "vitobar-settings"
+name = "vitosettings"
 path = "src/settings/main.rs"
 
 [dependencies]

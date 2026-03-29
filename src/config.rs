@@ -31,16 +31,78 @@ pub struct Config {
     pub font_path: Option<String>,
 }
 
+fn load_stylix_colors() -> Option<Colors> {
+    let home = std::env::var("HOME").unwrap_or_else(|_| "/root".into());
+    let path = PathBuf::from(home).join(".config/stylix/palette.json");
+    let content = fs::read_to_string(&path).ok()?;
+    let map: serde_json::Value = serde_json::from_str(&content).ok()?;
+    let obj = map.as_object()?;
+
+    // palette.json uses "base0A"–"base0F" (uppercase hex digits A-F), struct fields lowercase.
+    let get = |key: &str| -> Option<String> {
+        let upper_key = if key.len() == 6 {
+            format!("{}{}", &key[..5], key[5..].to_uppercase())
+        } else {
+            key.to_string()
+        };
+        obj.get(key)
+            .or_else(|| obj.get(&upper_key))
+            .and_then(|v| v.as_str())
+            .map(|s| s.trim_start_matches('#').to_string())
+    };
+
+    Some(Colors {
+        base00: get("base00")?,
+        base01: get("base01")?,
+        base02: get("base02")?,
+        base03: get("base03")?,
+        base04: get("base04")?,
+        base05: get("base05")?,
+        base06: get("base06")?,
+        base07: get("base07")?,
+        base08: get("base08")?,
+        base09: get("base09")?,
+        base0a: get("base0a")?,
+        base0b: get("base0b")?,
+        base0c: get("base0c")?,
+        base0d: get("base0d")?,
+        base0e: get("base0e")?,
+        base0f: get("base0f")?,
+    })
+}
+
 impl Config {
     pub fn load() -> Self {
+        // 1. Try stylix palette.json — colors only; other settings from config.toml if present
+        if let Some(colors) = load_stylix_colors() {
+            log::info!("loaded colors from stylix palette.json");
+            let toml = Self::load_from_toml();
+            return Self {
+                colors,
+                bar_height:     toml.as_ref().and_then(|c| c.bar_height).or(Some(22)),
+                taskbar_height: toml.as_ref().and_then(|c| c.taskbar_height).or(Some(22)),
+                font_size:      toml.as_ref().and_then(|c| c.font_size).or(Some(11.0)),
+                font_path:      toml.as_ref().and_then(|c| c.font_path.clone()),
+            };
+        }
+
+        // 2. Try ~/.config/vitobar/config.toml
+        if let Some(cfg) = Self::load_from_toml() {
+            return cfg;
+        }
+
+        // 3. Hardcoded Catppuccin Mocha defaults
+        log::warn!("no config found at {:?}, using defaults", config_path());
+        Self::default()
+    }
+
+    fn load_from_toml() -> Option<Self> {
         let path = config_path();
         if path.exists() {
-            let content = fs::read_to_string(&path)
-                .expect("failed to read vitobar config");
-            toml::from_str(&content).expect("failed to parse vitobar config")
+            let content = fs::read_to_string(&path).ok()?;
+            toml::from_str(&content).ok()
         } else {
-            log::warn!("no config found at {:?}, using defaults", path);
-            Self::default()
+            None
         }
     }
 }

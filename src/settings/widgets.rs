@@ -23,6 +23,24 @@ pub enum Widget {
     },
 }
 
+fn read_hostname() -> String {
+    std::fs::read_to_string("/etc/hostname")
+        .map(|s| s.trim().to_string())
+        .unwrap_or_else(|_| "nixos".to_string())
+}
+
+fn get_nix_generation() -> String {
+    let out = std::process::Command::new("nix-env")
+        .args(["--list-generations"])
+        .output()
+        .ok();
+    out.and_then(|o| {
+        let text = String::from_utf8_lossy(&o.stdout).to_string();
+        text.lines().last().map(|l| l.trim().to_string())
+    })
+    .unwrap_or_else(|| "unknown".to_string())
+}
+
 pub fn build_widgets(cat: Category) -> Vec<Widget> {
     match cat {
         Category::Display => {
@@ -102,6 +120,37 @@ pub fn build_widgets(cat: Category) -> Vec<Widget> {
                 cmd:   "systemctl poweroff".into(),
             },
         ],
+
+        Category::NixOS => {
+            let hostname = read_hostname();
+            let generation = get_nix_generation();
+            vec![
+                Widget::InfoRow {
+                    label: "Generation".into(),
+                    value: generation,
+                },
+                Widget::Button {
+                    label: "Flake Update".into(),
+                    cmd:   "nix flake update /etc/nixos".into(),
+                },
+                Widget::Button {
+                    label: "Rebuild Switch".into(),
+                    cmd:   format!("sudo nixos-rebuild switch --flake /etc/nixos#{}", hostname),
+                },
+                Widget::Button {
+                    label: "Rebuild Boot".into(),
+                    cmd:   format!("sudo nixos-rebuild boot --flake /etc/nixos#{}", hostname),
+                },
+                Widget::Button {
+                    label: "Garbage Collect".into(),
+                    cmd:   "nix store gc".into(),
+                },
+                Widget::Button {
+                    label: "Optimise Store".into(),
+                    cmd:   "nix store optimise".into(),
+                },
+            ]
+        }
     }
 }
 
