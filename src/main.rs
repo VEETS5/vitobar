@@ -274,7 +274,7 @@ fn draw_top_on(
     let pool = match out.top_pool.as_mut() {
         Some(p) => p,
         None    => {
-            let size = width as usize * BAR_HEIGHT as usize * 4 * 4;
+            let size = pw as usize * ph as usize * 4 * 2;
             out.top_pool = Some(SlotPool::new(size, shm).expect("top pool"));
             out.top_pool.as_mut().unwrap()
         }
@@ -507,7 +507,7 @@ fn draw_bot_on(
     let pool = match out.bot_pool.as_mut() {
         Some(p) => p,
         None    => {
-            let size = width as usize * TASKBAR_HEIGHT as usize * 4 * 4;
+            let size = pw as usize * ph as usize * 4 * 2;
             out.bot_pool = Some(SlotPool::new(size, shm).expect("bot pool"));
             out.bot_pool.as_mut().unwrap()
         }
@@ -937,7 +937,12 @@ impl CompositorHandler for VitoBar {
             let is_mine = out.top_surface.as_ref().map(|s| s.wl_surface() == surface).unwrap_or(false)
                 || out.bot_surface.as_ref().map(|s| s.wl_surface() == surface).unwrap_or(false);
             if is_mine {
-                out.scale = factor.max(1) as u32;
+                let new_scale = factor.max(1) as u32;
+                if new_scale != out.scale {
+                    out.scale = new_scale;
+                    out.top_pool = None;
+                    out.bot_pool = None;
+                }
                 break;
             }
         }
@@ -1275,23 +1280,46 @@ delegate_keyboard!(VitoBar);
 delegate_pointer!(VitoBar);
 delegate_registry!(VitoBar);
 
-/// Nearest-neighbour scale an RGBA icon from src_size to dst_size.
+/// Bilinear-interpolated scale of an RGBA icon from src_size to dst_size.
 fn scale_icon(rgba: &[u8], src_size: u32, dst_size: u32) -> Vec<u8> {
     if src_size == dst_size { return rgba.to_vec(); }
+    bilinear_scale(rgba, src_size, dst_size)
+}
+
+fn bilinear_scale(rgba: &[u8], src_size: u32, dst_size: u32) -> Vec<u8> {
     let t = dst_size as usize;
     let s = src_size as usize;
     let mut out = vec![0u8; t * t * 4];
     let ratio = s as f32 / t as f32;
     for dy in 0..t {
         for dx in 0..t {
-            let sx = ((dx as f32 + 0.5) * ratio) as usize;
-            let sy = ((dy as f32 + 0.5) * ratio) as usize;
-            let sx = sx.min(s - 1);
-            let sy = sy.min(s - 1);
-            let si = (sy * s + sx) * 4;
-            let di = (dy * t + dx) * 4;
-            if si + 3 < rgba.len() && di + 3 < out.len() {
-                out[di..di + 4].copy_from_slice(&rgba[si..si + 4]);
+            let src_x = (dx as f32 + 0.5) * ratio - 0.5;
+            let src_y = (dy as f32 + 0.5) * ratio - 0.5;
+            let x0 = (src_x.floor() as isize).max(0) as usize;
+            let y0 = (src_y.floor() as isize).max(0) as usize;
+            let x1 = (x0 + 1).min(s - 1);
+            let y1 = (y0 + 1).min(s - 1);
+            let fx = src_x - x0 as f32;
+            let fy = src_y - y0 as f32;
+            let fx = fx.clamp(0.0, 1.0);
+            let fy = fy.clamp(0.0, 1.0);
+
+            let i00 = (y0 * s + x0) * 4;
+            let i10 = (y0 * s + x1) * 4;
+            let i01 = (y1 * s + x0) * 4;
+            let i11 = (y1 * s + x1) * 4;
+            let di  = (dy * t + dx) * 4;
+
+            if i11 + 3 >= rgba.len() { continue; }
+            for c in 0..4 {
+                let v00 = rgba[i00 + c] as f32;
+                let v10 = rgba[i10 + c] as f32;
+                let v01 = rgba[i01 + c] as f32;
+                let v11 = rgba[i11 + c] as f32;
+                let top    = v00 + (v10 - v00) * fx;
+                let bottom = v01 + (v11 - v01) * fx;
+                let val    = top + (bottom - top) * fy;
+                out[di + c] = val.round() as u8;
             }
         }
     }

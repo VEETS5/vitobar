@@ -151,20 +151,39 @@ fn decode_and_scale(path: &std::path::Path, target: u32) -> Option<Vec<u8>> {
         _ => return None,
     };
 
-    // Nearest-neighbour scale to target × target
+    // Bilinear interpolation scale to target × target
     let t = target as usize;
+    let (sw_us, sh_us) = (sw as usize, sh as usize);
     let mut out = vec![0u8; t * t * 4];
     let rx = sw as f32 / target as f32;
     let ry = sh as f32 / target as f32;
     for dy in 0..t {
         for dx in 0..t {
-            let sx = ((dx as f32 + 0.5) * rx) as usize;
-            let sy = ((dy as f32 + 0.5) * ry) as usize;
-            let sx = sx.min(sw as usize - 1);
-            let sy = sy.min(sh as usize - 1);
-            let si = (sy * sw as usize + sx) * 4;
-            let di = (dy * t + dx) * 4;
-            out[di..di + 4].copy_from_slice(&rgba[si..si + 4]);
+            let src_x = (dx as f32 + 0.5) * rx - 0.5;
+            let src_y = (dy as f32 + 0.5) * ry - 0.5;
+            let x0 = (src_x.floor() as isize).max(0) as usize;
+            let y0 = (src_y.floor() as isize).max(0) as usize;
+            let x1 = (x0 + 1).min(sw_us - 1);
+            let y1 = (y0 + 1).min(sh_us - 1);
+            let fx = src_x.fract().clamp(0.0, 1.0);
+            let fy = src_y.fract().clamp(0.0, 1.0);
+
+            let i00 = (y0 * sw_us + x0) * 4;
+            let i10 = (y0 * sw_us + x1) * 4;
+            let i01 = (y1 * sw_us + x0) * 4;
+            let i11 = (y1 * sw_us + x1) * 4;
+            let di  = (dy * t + dx) * 4;
+
+            for c in 0..4 {
+                let v00 = rgba[i00 + c] as f32;
+                let v10 = rgba[i10 + c] as f32;
+                let v01 = rgba[i01 + c] as f32;
+                let v11 = rgba[i11 + c] as f32;
+                let top    = v00 + (v10 - v00) * fx;
+                let bottom = v01 + (v11 - v01) * fx;
+                let val    = top + (bottom - top) * fy;
+                out[di + c] = val.round() as u8;
+            }
         }
     }
     Some(out)
