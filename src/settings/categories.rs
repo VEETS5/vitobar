@@ -1,34 +1,37 @@
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Category {
+    Appearance,
     Display,
     Audio,
-    Bluetooth,
     Network,
+    Bluetooth,
+    Wallpaper,
     Power,
-    NixOS,
     System,
 }
 
 impl Category {
     pub const ALL: &'static [Category] = &[
+        Category::Appearance,
         Category::Display,
         Category::Audio,
-        Category::Bluetooth,
         Category::Network,
+        Category::Bluetooth,
+        Category::Wallpaper,
         Category::Power,
-        Category::NixOS,
         Category::System,
     ];
 
     pub fn label(&self) -> &'static str {
         match self {
-            Category::Display   => "\u{f878} Display",
-            Category::Audio     => "\u{f028} Audio",
-            Category::Bluetooth => "\u{f294} Bluetooth",
-            Category::Network   => "\u{f1eb} Network",
-            Category::Power     => "\u{f011} Power",
-            Category::NixOS     => "\u{f313} NixOS",
-            Category::System    => "\u{f085} System",
+            Category::Appearance => "\u{f53f}  Appearance",
+            Category::Display    => "\u{f878}  Display",
+            Category::Audio      => "\u{f028}  Audio",
+            Category::Network    => "\u{f1eb}  Network",
+            Category::Bluetooth  => "\u{f294}  Bluetooth",
+            Category::Wallpaper  => "\u{f03e}  Wallpaper",
+            Category::Power      => "\u{f011}  Power",
+            Category::System     => "\u{f085}  System",
         }
     }
 }

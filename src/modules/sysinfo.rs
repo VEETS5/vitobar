@@ -18,8 +18,10 @@ pub struct SysMonitor {
 
 impl SysMonitor {
     pub fn new() -> Self {
-        let mut sys = System::new_all();
-        sys.refresh_all();
+        let mut sys = System::new();
+        // Only load CPU and memory — skip expensive process/disk/network scan
+        sys.refresh_cpu_usage();
+        sys.refresh_memory();
         Self { sys }
     }
 

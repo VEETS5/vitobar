@@ -7,7 +7,7 @@ mod widgets;
 use config::Config;
 use render::Renderer;
 use categories::Category;
-use widgets::{Widget, apply_widget_action, build_widgets};
+use widgets::{Widget, WidgetResult, apply_widget_action, build_widgets};
 
 use smithay_client_toolkit::shell::WaylandSurface;
 use smithay_client_toolkit::{
@@ -38,11 +38,11 @@ use calloop_wayland_source::WaylandSource;
 
 const WIN_W: u32 = 820;
 const WIN_H: u32 = 620;
-const TITLE_H:    f32 = 28.0;
+const TITLE_H:    f32 = 32.0;
 const SIDEBAR_W:  f32 = 180.0;
-const CAT_ROW_H:  f32 = 44.0;
-const WIDGET_ROW_H:   f32 = 52.0;
-const SECTION_ROW_H:  f32 = 32.0;
+const CAT_ROW_H:  f32 = 40.0;
+const WIDGET_ROW_H:   f32 = 48.0;
+const SECTION_ROW_H:  f32 = 30.0;
 const CONTENT_PAD: f32 = 16.0;
 
 struct SettingsApp {
@@ -69,12 +69,61 @@ struct SettingsApp {
     config:          Config,
     active_category: Category,
     widgets:         Vec<Widget>,
+    scroll_offset:   f32,
+    hovered_widget:  Option<usize>,
+    max_scroll:      f32,
 }
 
 impl SettingsApp {
     fn switch_category(&mut self, cat: Category) {
         self.active_category = cat;
-        self.widgets = build_widgets(cat);
+        self.widgets = build_widgets(cat, &self.config);
+        self.scroll_offset = 0.0;
+        self.hovered_widget = None;
+    }
+
+    fn handle_config_result(&mut self, result: WidgetResult) {
+        if let WidgetResult::ConfigUpdate { key, value } = result {
+            match key {
+                "bar_height" => self.config.bar_height = Some(value.round() as u32),
+                "taskbar_height" => self.config.taskbar_height = Some(value.round() as u32),
+                "font_size" => self.config.font_size = Some((value * 10.0).round() / 10.0),
+                _ => {}
+            }
+            config::save_bar_settings(
+                self.config.bar_height,
+                self.config.taskbar_height,
+                self.config.font_size,
+            );
+        }
+    }
+
+    fn content_height(&self) -> f32 {
+        let mut h: f32 = 0.0;
+        for widget in &self.widgets {
+            h += match widget {
+                Widget::SectionHeader { .. } => SECTION_ROW_H,
+                Widget::InfoRow { .. }       => WIDGET_ROW_H * 0.7,
+                _                            => WIDGET_ROW_H,
+            };
+        }
+        h
+    }
+
+    fn widget_at_y(&self, content_ly: f32) -> Option<usize> {
+        let mut wy: f32 = 0.0;
+        for (i, widget) in self.widgets.iter().enumerate() {
+            let widget_h = match widget {
+                Widget::SectionHeader { .. } => SECTION_ROW_H,
+                Widget::InfoRow { .. }       => WIDGET_ROW_H * 0.7,
+                _                            => WIDGET_ROW_H,
+            };
+            if content_ly >= wy && content_ly < wy + widget_h {
+                return Some(i);
+            }
+            wy += widget_h;
+        }
+        None
     }
 
     fn draw(&mut self) {
@@ -82,6 +131,9 @@ impl SettingsApp {
         let pw     = self.width  * scale;
         let ph     = self.height * scale;
         let sf     = scale as f32;
+
+        // Pre-compute before borrowing pool
+        let total_content_h_logical = self.content_height();
 
         let pool    = match self.pool.as_mut()    { Some(p) => p, None => return };
         let surface = match self.surface.as_ref() { Some(s) => s, None => return };
@@ -97,43 +149,37 @@ impl SettingsApp {
         let fsz = self.config.font_size.unwrap_or(11.0) * sf;
         let icon_fsz = fsz * 1.3;
 
-        // ── 90s raised-panel double border ─────────────────────────────────
-        // outer accent border
+        // ── Outer border + accent ─────────────────────────────────────────
         r.draw_rect_outline(0.0, 0.0, pw as f32, ph as f32,
-            &self.config.colors.base0d, 2.0 * sf);
-        // inner shadow border (inset 3px)
-        r.draw_rect_outline(3.0 * sf, 3.0 * sf,
-            pw as f32 - 6.0 * sf, ph as f32 - 6.0 * sf,
-            &self.config.colors.base03, 1.0 * sf);
+            &self.config.colors.base02, 1.5 * sf);
+        r.draw_rect(0.0, 0.0, pw as f32, 1.0 * sf, &self.config.colors.base0d);
 
         // ── Title bar ───────────────────────────────────────────────────────
         let th = TITLE_H * sf;
         r.draw_rect(0.0, 0.0, pw as f32, th, &self.config.colors.base01);
-        // Title bar bottom divider
-        r.draw_rect(0.0, th, pw as f32, 1.5 * sf, &self.config.colors.base02);
+        r.draw_rect(0.0, th - 1.0 * sf, pw as f32, 1.0 * sf, &self.config.colors.base0d);
 
-        // Window icon + title
         let title_str = "\u{f313}  Settings";
-        r.draw_text(title_str, 12.0 * sf, th * 0.72, fsz * 1.1, &self.config.colors.base0d);
+        r.draw_text(title_str, 12.0 * sf, th * 0.70, fsz * 1.1, &self.config.colors.base0d);
 
-        // X close button (top-right)
-        let close_w = 26.0 * sf;
-        let close_h = th - 4.0 * sf;
+        // X close button
+        let close_w = 28.0 * sf;
+        let close_h = th - 6.0 * sf;
         let close_x = pw as f32 - close_w - 4.0 * sf;
-        let close_y = 2.0 * sf;
-        r.draw_rect(close_x, close_y, close_w, close_h, &self.config.colors.base01);
+        let close_y = 3.0 * sf;
+        r.draw_rect(close_x, close_y, close_w, close_h, &self.config.colors.base02);
         r.draw_rect_outline(close_x, close_y, close_w, close_h,
-            &self.config.colors.base08, 1.5 * sf);
-        let x_label = "\u{f00d}";  // nf-fa-times
+            &self.config.colors.base08, 1.0 * sf);
+        let x_label = "\u{f00d}";
         let xtw = r.measure_text(x_label, icon_fsz);
         r.draw_text(x_label,
             close_x + (close_w - xtw) / 2.0,
-            close_y + close_h * 0.75,
+            close_y + close_h * 0.72,
             icon_fsz, &self.config.colors.base08);
 
         // ── Sidebar ────────────────────────────────────────────────────────
         let sidebar_w = SIDEBAR_W * sf;
-        let sidebar_y = th + 1.5 * sf;
+        let sidebar_y = th;
         let sidebar_h = ph as f32 - sidebar_y;
         r.draw_rect(0.0, sidebar_y, sidebar_w, sidebar_h, &self.config.colors.base01);
 
@@ -143,155 +189,207 @@ impl SettingsApp {
 
             if *cat == self.active_category {
                 r.draw_rect(0.0, ry, sidebar_w, rh, &self.config.colors.base02);
-                r.draw_rect_outline(0.0, ry, sidebar_w, rh,
-                    &self.config.colors.base0d, 1.0 * sf);
-                // left accent strip
-                r.draw_rect(0.0, ry, 4.0 * sf, rh, &self.config.colors.base0d);
-            } else {
-                r.draw_rect_outline(0.0, ry, sidebar_w, rh,
-                    &self.config.colors.base02, 0.75 * sf);
+                // Left accent strip
+                r.draw_rect(0.0, ry, 3.0 * sf, rh, &self.config.colors.base0d);
             }
+
+            // Bottom separator
+            r.draw_rect(8.0 * sf, ry + rh - 1.0, sidebar_w - 16.0 * sf, 1.0,
+                &self.config.colors.base02);
 
             let text_col = if *cat == self.active_category {
                 self.config.colors.base07.clone()
             } else {
                 self.config.colors.base04.clone()
             };
-            r.draw_text(cat.label(), 12.0 * sf, ry + rh * 0.65, fsz, &text_col);
+            r.draw_text(cat.label(), 14.0 * sf, ry + rh * 0.62, fsz, &text_col);
         }
 
         // Sidebar right border
-        r.draw_rect(sidebar_w, sidebar_y, 1.5 * sf, sidebar_h,
+        r.draw_rect(sidebar_w, sidebar_y, 1.0 * sf, sidebar_h,
             &self.config.colors.base02);
 
         // ── Content area ───────────────────────────────────────────────────
         let cx  = sidebar_w + CONTENT_PAD * sf;
         let cw  = pw as f32 - cx - CONTENT_PAD * sf;
-        let cty = th + 1.5 * sf;  // content top y
+        let cty = th;
 
         // Category title
         r.draw_text(
             self.active_category.label(),
-            cx, cty + 22.0 * sf,
+            cx, cty + 24.0 * sf,
             fsz * 1.2,
             &self.config.colors.base05,
         );
 
         // Divider below title
         let div_y = cty + 32.0 * sf;
-        r.draw_rect(cx, div_y, cw, 1.5 * sf, &self.config.colors.base02);
+        r.draw_rect(cx, div_y, cw, 1.0 * sf, &self.config.colors.base0d);
 
-        let mut wy = div_y + 10.0 * sf;
+        let content_top = div_y + 8.0 * sf;
+        let content_area_h = ph as f32 - content_top - 4.0 * sf;
+        let total_content_h = total_content_h_logical * sf;
+        self.max_scroll = (total_content_h - content_area_h).max(0.0) / sf;
 
-        for widget in &self.widgets {
+        let mut wy = content_top - self.scroll_offset * sf;
+
+        for (wi, widget) in self.widgets.iter().enumerate() {
+            let is_hovered = self.hovered_widget == Some(wi);
+
             match widget {
                 Widget::SectionHeader { label } => {
                     let sh = SECTION_ROW_H * sf;
-                    // Section label
-                    r.draw_text(label, cx, wy + sh * 0.72, fsz * 0.9,
-                        &self.config.colors.base03);
-                    // Underline
-                    r.draw_rect(cx, wy + sh - 1.0 * sf, cw, 1.0 * sf,
-                        &self.config.colors.base02);
+                    if wy + sh > content_top && wy < ph as f32 {
+                        r.draw_text(label, cx, wy + sh * 0.72, fsz * 0.9,
+                            &self.config.colors.base0d);
+                        r.draw_rect(cx, wy + sh - 1.0 * sf, cw, 1.0 * sf,
+                            &self.config.colors.base02);
+                    }
                     wy += sh;
                 }
 
-                Widget::Slider { label, value, .. } => {
+                Widget::Slider { label, value, .. } | Widget::ConfigSlider { label, value, .. } => {
                     let wh = WIDGET_ROW_H * sf;
-                    r.draw_text(label, cx, wy + fsz * 1.1, fsz,
-                        &self.config.colors.base04);
+                    if wy + wh > content_top && wy < ph as f32 {
+                        if is_hovered {
+                            r.draw_rect(cx - 4.0 * sf, wy, cw + 8.0 * sf, wh,
+                                &self.config.colors.base01);
+                        }
 
-                    let track_x = cx + 120.0 * sf;
-                    let track_w = cw - 120.0 * sf - 60.0 * sf;
-                    let track_y = wy + wh * 0.5 - 3.0 * sf;
-                    let track_h = 6.0 * sf;
+                        r.draw_text(label, cx, wy + fsz * 1.3, fsz,
+                            &self.config.colors.base05);
 
-                    r.draw_rect(track_x, track_y, track_w, track_h,
-                        &self.config.colors.base02);
-                    r.draw_rect(track_x, track_y, track_w * value, track_h,
-                        &self.config.colors.base0d);
-                    // thumb circle (as small square)
-                    let thumb_x = track_x + track_w * value - 4.0 * sf;
-                    r.draw_rect(thumb_x, track_y - 3.0 * sf, 8.0 * sf, track_h + 6.0 * sf,
-                        &self.config.colors.base0d);
-                    r.draw_rect_outline(thumb_x, track_y - 3.0 * sf,
-                        8.0 * sf, track_h + 6.0 * sf,
-                        &self.config.colors.base07, 1.0 * sf);
+                        let track_x = cx + 140.0 * sf;
+                        let track_w = cw - 140.0 * sf - 60.0 * sf;
+                        let track_y = wy + wh * 0.5 - 3.0 * sf;
+                        let track_h = 6.0 * sf;
 
-                    let pct_str = format!("{:.0}%", value * 100.0);
-                    let pct_x = track_x + track_w + 10.0 * sf;
-                    r.draw_text(&pct_str, pct_x, wy + wh * 0.65, fsz,
-                        &self.config.colors.base05);
+                        // Track background
+                        r.draw_rect(track_x, track_y, track_w, track_h,
+                            &self.config.colors.base02);
+                        // Track fill
+                        r.draw_rect(track_x, track_y, track_w * value, track_h,
+                            &self.config.colors.base0d);
+                        // Thumb
+                        let thumb_x = track_x + track_w * value - 5.0 * sf;
+                        r.draw_rect(thumb_x, track_y - 4.0 * sf, 10.0 * sf, track_h + 8.0 * sf,
+                            &self.config.colors.base0d);
+                        r.draw_rect_outline(thumb_x, track_y - 4.0 * sf,
+                            10.0 * sf, track_h + 8.0 * sf,
+                            &self.config.colors.base07, 1.0 * sf);
+
+                        // Value display
+                        let display_val = match widget {
+                            Widget::ConfigSlider { min, max, .. } => {
+                                let actual = min + (max - min) * value;
+                                format!("{:.0}", actual)
+                            }
+                            _ => format!("{:.0}%", value * 100.0),
+                        };
+                        let pct_x = track_x + track_w + 10.0 * sf;
+                        r.draw_text(&display_val, pct_x, wy + wh * 0.62, fsz,
+                            &self.config.colors.base05);
+                    }
                     wy += wh;
                 }
 
                 Widget::Toggle { label, value, .. } => {
                     let wh = WIDGET_ROW_H * sf;
-                    r.draw_text(label, cx, wy + fsz * 1.1, fsz,
-                        &self.config.colors.base04);
+                    if wy + wh > content_top && wy < ph as f32 {
+                        if is_hovered {
+                            r.draw_rect(cx - 4.0 * sf, wy, cw + 8.0 * sf, wh,
+                                &self.config.colors.base01);
+                        }
 
-                    let toggle_x = cx + 120.0 * sf;
-                    let toggle_y = wy + wh * 0.5 - 9.0 * sf;
-                    let toggle_w = 40.0 * sf;
-                    let toggle_h = 20.0 * sf;
+                        r.draw_text(label, cx, wy + fsz * 1.3, fsz,
+                            &self.config.colors.base05);
 
-                    let track_col = if *value {
-                        self.config.colors.base0d.clone()
-                    } else {
-                        self.config.colors.base02.clone()
-                    };
-                    r.draw_rect(toggle_x, toggle_y, toggle_w, toggle_h, &track_col);
-                    r.draw_rect_outline(toggle_x, toggle_y, toggle_w, toggle_h,
-                        &self.config.colors.base03, 1.0 * sf);
+                        let toggle_x = cx + 140.0 * sf;
+                        let toggle_y = wy + wh * 0.5 - 10.0 * sf;
+                        let toggle_w = 42.0 * sf;
+                        let toggle_h = 22.0 * sf;
 
-                    let thumb_x = if *value {
-                        toggle_x + toggle_w - toggle_h
-                    } else {
-                        toggle_x
-                    };
-                    let thumb_col = if *value {
-                        self.config.colors.base00.clone()
-                    } else {
-                        self.config.colors.base04.clone()
-                    };
-                    r.draw_rect(thumb_x, toggle_y, toggle_h, toggle_h, &thumb_col);
+                        let track_col = if *value {
+                            self.config.colors.base0d.clone()
+                        } else {
+                            self.config.colors.base02.clone()
+                        };
+                        r.draw_rect(toggle_x, toggle_y, toggle_w, toggle_h, &track_col);
+                        r.draw_rect_outline(toggle_x, toggle_y, toggle_w, toggle_h,
+                            &self.config.colors.base03, 1.0 * sf);
 
-                    let state_str = if *value { "On" } else { "Off" };
-                    r.draw_text(state_str, toggle_x + toggle_w + 8.0 * sf,
-                        wy + wh * 0.65, fsz, &self.config.colors.base05);
+                        let thumb_x = if *value {
+                            toggle_x + toggle_w - toggle_h
+                        } else {
+                            toggle_x
+                        };
+                        let thumb_col = if *value {
+                            self.config.colors.base07.clone()
+                        } else {
+                            self.config.colors.base04.clone()
+                        };
+                        r.draw_rect(thumb_x + 2.0 * sf, toggle_y + 2.0 * sf,
+                            toggle_h - 4.0 * sf, toggle_h - 4.0 * sf, &thumb_col);
+
+                        let state_str = if *value { "On" } else { "Off" };
+                        let state_col = if *value {
+                            &self.config.colors.base0b
+                        } else {
+                            &self.config.colors.base04
+                        };
+                        r.draw_text(state_str, toggle_x + toggle_w + 8.0 * sf,
+                            wy + wh * 0.62, fsz, state_col);
+                    }
                     wy += wh;
                 }
 
                 Widget::InfoRow { label, value } => {
-                    let wh = WIDGET_ROW_H * sf;
-                    r.draw_text(label, cx, wy + fsz * 1.1, fsz,
-                        &self.config.colors.base03);
-                    let avail = cw - 100.0 * sf;
-                    let clipped = r.clip_text(value, avail, fsz);
-                    r.draw_text(&clipped, cx + 100.0 * sf, wy + fsz * 1.1, fsz,
-                        &self.config.colors.base05);
-                    wy += wh * 0.7;  // info rows are more compact
+                    let wh = WIDGET_ROW_H * 0.7 * sf;
+                    if wy + wh > content_top && wy < ph as f32 {
+                        r.draw_text(label, cx, wy + fsz * 1.1, fsz,
+                            &self.config.colors.base03);
+                        let avail = cw - 110.0 * sf;
+                        let clipped = r.clip_text(value, avail, fsz);
+                        r.draw_text(&clipped, cx + 110.0 * sf, wy + fsz * 1.1, fsz,
+                            &self.config.colors.base05);
+                    }
+                    wy += wh;
                 }
 
                 Widget::Button { label, .. } => {
                     let wh = WIDGET_ROW_H * sf;
-                    let btn_w = (r.measure_text(label, fsz) + 24.0 * sf).min(cw - 8.0 * sf);
-                    let btn_h = 28.0 * sf;
-                    let btn_y = wy + (wh - btn_h) / 2.0;
+                    if wy + wh > content_top && wy < ph as f32 {
+                        let btn_w = (r.measure_text(label, fsz) + 24.0 * sf).min(cw - 8.0 * sf);
+                        let btn_h = 30.0 * sf;
+                        let btn_y = wy + (wh - btn_h) / 2.0;
 
-                    r.draw_rect(cx, btn_y, btn_w, btn_h,
-                        &self.config.colors.base01);
-                    r.draw_rect_outline(cx, btn_y, btn_w, btn_h,
-                        &self.config.colors.base0d, 1.5 * sf);
-                    // inner highlight (90s raised button feel)
-                    r.draw_rect_outline(cx + 1.5 * sf, btn_y + 1.5 * sf,
-                        btn_w - 3.0 * sf, btn_h - 3.0 * sf,
-                        &self.config.colors.base02, 0.75 * sf);
-                    r.draw_text(label, cx + 12.0 * sf, btn_y + btn_h * 0.72, fsz,
-                        &self.config.colors.base0d);
+                        let (btn_bg, btn_border) = if is_hovered {
+                            (&self.config.colors.base02, &self.config.colors.base0d)
+                        } else {
+                            (&self.config.colors.base01, &self.config.colors.base03)
+                        };
+                        r.draw_rect(cx, btn_y, btn_w, btn_h, btn_bg);
+                        r.draw_rect_outline(cx, btn_y, btn_w, btn_h, btn_border, 1.0 * sf);
+                        let text_col = if is_hovered {
+                            &self.config.colors.base07
+                        } else {
+                            &self.config.colors.base05
+                        };
+                        r.draw_text(label, cx + 12.0 * sf, btn_y + btn_h * 0.70, fsz, text_col);
+                    }
                     wy += wh;
                 }
             }
+        }
+
+        // ── Scrollbar ───────────────────────────────────────────────────────
+        if total_content_h > content_area_h {
+            let sb_x = pw as f32 - 6.0 * sf;
+            let sb_h = content_area_h;
+            let thumb_h = (content_area_h / total_content_h * sb_h).max(20.0 * sf);
+            let thumb_y = content_top + (self.scroll_offset * sf / total_content_h * sb_h);
+            r.draw_rect(sb_x, content_top, 4.0 * sf, sb_h, &self.config.colors.base01);
+            r.draw_rect(sb_x, thumb_y, 4.0 * sf, thumb_h, &self.config.colors.base0d);
         }
 
         // ── Flush ──────────────────────────────────────────────────────────
@@ -307,16 +405,15 @@ impl SettingsApp {
     }
 
     fn handle_click(&mut self, lx: f32, ly: f32) {
-        // X close button (top-right of title bar, logical coords)
-        let close_x = self.width as f32 - 30.0;
+        // X close button
+        let close_x = self.width as f32 - 32.0;
         if lx >= close_x && ly < TITLE_H {
             self.running = false;
             return;
         }
 
-        // Sidebar click — switch category
+        // Sidebar click
         if lx < SIDEBAR_W {
-            // Only process clicks in the sidebar area below the title bar
             if ly < TITLE_H { return; }
             let ly_sidebar = ly - TITLE_H;
             let idx = (ly_sidebar / CAT_ROW_H) as usize;
@@ -327,52 +424,41 @@ impl SettingsApp {
             return;
         }
 
-        // Content area click — ly is still in full-window coordinates
-        // Adjust for title bar + category title + divider
-        let content_top = TITLE_H + 1.5 + 32.0 + 10.0;  // th + div_y offset + gap
-        let content_ly = ly - content_top;
+        // Content area click
+        let content_top = TITLE_H + 32.0 + 8.0;
+        let content_ly = ly - content_top + self.scroll_offset;
         if content_ly < 0.0 { return; }
 
-        // Walk through widgets to find which one was clicked
-        let mut wy: f32 = 0.0;
-        for (widget_idx, widget) in self.widgets.iter().enumerate() {
-            let widget_h = match widget {
-                Widget::SectionHeader { .. } => SECTION_ROW_H,
-                Widget::InfoRow { .. }       => WIDGET_ROW_H * 0.7,
-                _                            => WIDGET_ROW_H,
-            };
+        if let Some(widget_idx) = self.widget_at_y(content_ly) {
+            let cx      = SIDEBAR_W + CONTENT_PAD;
+            let track_x = cx + 140.0;
+            let cw      = self.width as f32 - cx - CONTENT_PAD;
+            let track_w = cw - 140.0 - 60.0;
 
-            if content_ly >= wy && content_ly < wy + widget_h {
-                let cx      = SIDEBAR_W + CONTENT_PAD;
-                let track_x = cx + 120.0;
-                let cw      = self.width as f32 - cx - CONTENT_PAD;
-                let track_w = cw - 120.0 - 60.0;
-
-                match &self.widgets[widget_idx] {
-                    Widget::Slider { .. } => {
-                        if lx >= track_x && lx <= track_x + track_w {
-                            let val = ((lx - track_x) / track_w).clamp(0.0, 1.0);
-                            apply_widget_action(&mut self.widgets[widget_idx], val);
-                            self.draw();
-                        }
-                        self.drag_widget = Some(widget_idx);
-                    }
-                    Widget::Toggle { .. } => {
-                        // Any click anywhere in the row toggles (expanded from narrow 36px)
-                        let current = matches!(&self.widgets[widget_idx],
-                            Widget::Toggle { value: true, .. });
-                        apply_widget_action(&mut self.widgets[widget_idx],
-                            if current { 0.0 } else { 1.0 });
+            match &self.widgets[widget_idx] {
+                Widget::Slider { .. } | Widget::ConfigSlider { .. } => {
+                    if lx >= track_x && lx <= track_x + track_w {
+                        let val = ((lx - track_x) / track_w).clamp(0.0, 1.0);
+                        let result = apply_widget_action(&mut self.widgets[widget_idx], val);
+                        self.handle_config_result(result);
                         self.draw();
                     }
-                    Widget::Button { .. } => {
-                        apply_widget_action(&mut self.widgets[widget_idx], 1.0);
-                    }
-                    Widget::InfoRow { .. } | Widget::SectionHeader { .. } => {}
+                    self.drag_widget = Some(widget_idx);
                 }
-                return;
+                Widget::Toggle { .. } => {
+                    let current = matches!(&self.widgets[widget_idx],
+                        Widget::Toggle { value: true, .. });
+                    let result = apply_widget_action(&mut self.widgets[widget_idx],
+                        if current { 0.0 } else { 1.0 });
+                    self.handle_config_result(result);
+                    self.draw();
+                }
+                Widget::Button { .. } => {
+                    let result = apply_widget_action(&mut self.widgets[widget_idx], 1.0);
+                    self.handle_config_result(result);
+                }
+                Widget::InfoRow { .. } | Widget::SectionHeader { .. } => {}
             }
-            wy += widget_h;
         }
     }
 }
@@ -488,17 +574,36 @@ impl PointerHandler for SettingsApp {
             match &event.kind {
                 Motion { .. } => {
                     self.pointer_pos = event.position;
+
+                    // Slider drag
                     if let Some(widget_idx) = self.drag_widget {
                         let lx = event.position.0 as f32;
                         let cx = SIDEBAR_W + CONTENT_PAD;
-                        let track_x = cx + 120.0;
+                        let track_x = cx + 140.0;
                         let cw = self.width as f32 - cx - CONTENT_PAD;
-                        let track_w = cw - 120.0 - 60.0;
+                        let track_w = cw - 140.0 - 60.0;
                         if track_w > 0.0 {
                             let val = ((lx - track_x) / track_w).clamp(0.0, 1.0);
-                            apply_widget_action(&mut self.widgets[widget_idx], val);
+                            let result = apply_widget_action(&mut self.widgets[widget_idx], val);
+                            self.handle_config_result(result);
                             self.draw();
                         }
+                        continue;
+                    }
+
+                    // Hover tracking in content area
+                    let lx = event.position.0 as f32;
+                    let ly = event.position.1 as f32;
+                    let content_top = TITLE_H + 32.0 + 8.0;
+                    let new_hover = if lx > SIDEBAR_W && ly > content_top {
+                        let content_ly = ly - content_top + self.scroll_offset;
+                        self.widget_at_y(content_ly)
+                    } else {
+                        None
+                    };
+                    if new_hover != self.hovered_widget {
+                        self.hovered_widget = new_hover;
+                        self.draw();
                     }
                 }
                 Press { button, .. } if *button == BTN_LEFT => {
@@ -508,6 +613,15 @@ impl PointerHandler for SettingsApp {
                 }
                 Release { button, .. } if *button == BTN_LEFT => {
                     self.drag_widget = None;
+                }
+                Axis { horizontal: _, vertical, source: _, time: _ } => {
+                    let delta = if vertical.discrete != 0 {
+                        vertical.discrete as f32 * 20.0
+                    } else {
+                        vertical.absolute as f32
+                    };
+                    self.scroll_offset = (self.scroll_offset + delta).clamp(0.0, self.max_scroll);
+                    self.draw();
                 }
                 _ => {}
             }
@@ -544,8 +658,8 @@ fn main() {
     render::load_font(&font_path);
 
     let config = Config::load();
-    let initial_category = Category::Display;
-    let initial_widgets  = build_widgets(initial_category);
+    let initial_category = Category::Appearance;
+    let initial_widgets  = build_widgets(initial_category, &config);
 
     let conn = Connection::connect_to_env().expect("wayland connect");
     let (globals, queue) = registry_queue_init::<SettingsApp>(&conn).expect("registry init");
@@ -589,6 +703,9 @@ fn main() {
         config,
         active_category: initial_category,
         widgets:         initial_widgets,
+        scroll_offset:   0.0,
+        hovered_widget:  None,
+        max_scroll:      0.0,
     };
 
     let mut event_loop: EventLoop<SettingsApp> = EventLoop::try_new().expect("event loop");

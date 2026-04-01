@@ -81,6 +81,9 @@ struct LauncherApp {
     // Content bounds in logical coords (updated each draw)
     content_x: f32,
     content_y: f32,
+
+    // Mouse hover tracking
+    hovered_row: Option<usize>,
 }
 
 impl LauncherApp {
@@ -233,12 +236,18 @@ impl LauncherApp {
             let ry = list_top + display_idx as f32 * rh;
             let entry = &self.all_entries[entry_idx];
             let is_selected = view_idx == self.selected;
+            let is_hovered = self.hovered_row == Some(view_idx);
 
             if is_selected {
                 r.draw_rect(px + pad, ry, pw - pad * 2.0, rh - 2.0 * sf,
                     &self.config.colors.base02);
                 r.draw_rect_outline(px + pad, ry, pw - pad * 2.0, rh - 2.0 * sf,
                     &self.config.colors.base0d, 1.5 * sf);
+            } else if is_hovered {
+                r.draw_rect(px + pad, ry, pw - pad * 2.0, rh - 2.0 * sf,
+                    &self.config.colors.base01);
+                r.draw_rect_outline(px + pad, ry, pw - pad * 2.0, rh - 2.0 * sf,
+                    &self.config.colors.base03, 1.0 * sf);
             }
 
             // Icon
@@ -458,6 +467,26 @@ impl PointerHandler for LauncherApp {
             match &event.kind {
                 Motion { .. } => {
                     self.pointer_pos = event.position;
+
+                    // Update hover highlight
+                    let (lx, ly) = (event.position.0 as f32, event.position.1 as f32);
+                    let rx = lx - self.content_x;
+                    let ry = ly - self.content_y;
+                    let search_area_h = SEARCH_H + PADDING;
+
+                    let new_hover = if rx >= 0.0 && rx < POPUP_W
+                        && ry >= search_area_h && ry < POPUP_H
+                    {
+                        let row = ((ry - search_area_h) / ROW_H) as usize + self.scroll_offset;
+                        if row < self.filtered.len() { Some(row) } else { None }
+                    } else {
+                        None
+                    };
+
+                    if new_hover != self.hovered_row {
+                        self.hovered_row = new_hover;
+                        self.draw();
+                    }
                 }
                 Press { button, .. } if *button == BTN_LEFT => {
                     let (lx, ly) = (event.position.0 as f32, event.position.1 as f32);
@@ -471,7 +500,6 @@ impl PointerHandler for LauncherApp {
                     }
 
                     // Click inside popup — relative coords
-                    let rx = lx - self.content_x;
                     let ry = ly - self.content_y;
                     let search_area_h = SEARCH_H + PADDING;
 
@@ -482,7 +510,33 @@ impl PointerHandler for LauncherApp {
                             self.launch_selected();
                         }
                     }
-                    let _ = rx;
+                }
+                Axis { horizontal: _, vertical, source: _, time: _ } => {
+                    // Mouse wheel scroll
+                    let delta = if vertical.discrete != 0 {
+                        vertical.discrete
+                    } else if vertical.absolute.abs() > 0.5 {
+                        vertical.absolute.signum() as i32
+                    } else {
+                        0
+                    };
+
+                    let vis = self.visible_rows();
+                    if delta > 0 && self.scroll_offset + vis < self.filtered.len() {
+                        // Scroll down
+                        self.scroll_offset += 1;
+                        if self.selected < self.scroll_offset {
+                            self.selected = self.scroll_offset;
+                        }
+                        self.draw();
+                    } else if delta < 0 && self.scroll_offset > 0 {
+                        // Scroll up
+                        self.scroll_offset -= 1;
+                        if vis > 0 && self.selected >= self.scroll_offset + vis {
+                            self.selected = self.scroll_offset + vis - 1;
+                        }
+                        self.draw();
+                    }
                 }
                 _ => {}
             }
@@ -577,6 +631,7 @@ fn main() {
         repeat_info:  (300, 50),  // defaults: 300ms initial, 50ms interval
         content_x:    0.0,
         content_y:    0.0,
+        hovered_row:  None,
     };
 
     let mut event_loop: EventLoop<LauncherApp> = EventLoop::try_new().expect("event loop");

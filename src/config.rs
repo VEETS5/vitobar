@@ -141,6 +141,35 @@ pub fn config_path() -> PathBuf {
     PathBuf::from(home).join(".config/vitobar/config.toml")
 }
 
+/// Save bar-specific settings to config.toml (preserves existing values).
+pub fn save_bar_settings(bar_height: Option<u32>, taskbar_height: Option<u32>, font_size: Option<f32>) {
+    let path = config_path();
+    let mut val: toml::Value = if path.exists() {
+        fs::read_to_string(&path)
+            .ok()
+            .and_then(|s| toml::from_str(&s).ok())
+            .unwrap_or(toml::Value::Table(Default::default()))
+    } else {
+        toml::Value::Table(Default::default())
+    };
+
+    if let Some(table) = val.as_table_mut() {
+        if let Some(v) = bar_height {
+            table.insert("bar_height".into(), toml::Value::Integer(v as i64));
+        }
+        if let Some(v) = taskbar_height {
+            table.insert("taskbar_height".into(), toml::Value::Integer(v as i64));
+        }
+        if let Some(v) = font_size {
+            table.insert("font_size".into(), toml::Value::Float(v as f64));
+        }
+    }
+
+    if let Ok(s) = toml::to_string_pretty(&val) {
+        fs::write(path, s).ok();
+    }
+}
+
 /// Parse a hex color string like "1e1e2e" into (r, g, b, a)
 pub fn hex_to_rgba(hex: &str) -> (u8, u8, u8, u8) {
     let hex = hex.trim_start_matches('#');

@@ -206,14 +206,17 @@ async fn run_watcher(tray_state: TrayState) -> zbus::Result<()> {
                 (raw.clone(), "/StatusNotifierItem".to_string())
             };
 
-            let proxy = match StatusNotifierItemProxy::builder(&conn)
+            let builder = match StatusNotifierItemProxy::builder(&conn)
                 .destination(bus_name.as_str())
-                .unwrap_or_else(|_| panic!("bad dest"))
-                .path(obj_path.as_str())
-                .unwrap_or_else(|_| panic!("bad path"))
-                .build()
-                .await
             {
+                Ok(b) => b,
+                Err(e) => { log::debug!("tray: invalid dest {bus_name}: {e}"); continue; }
+            };
+            let builder = match builder.path(obj_path.as_str()) {
+                Ok(b) => b,
+                Err(e) => { log::debug!("tray: invalid path {obj_path}: {e}"); continue; }
+            };
+            let proxy = match builder.build().await {
                 Ok(p) => p,
                 Err(e) => {
                     log::debug!("tray: can't connect to {raw}: {e}");
