@@ -189,6 +189,7 @@ struct PopupState {
     // Menu position in logical coords
     menu_x:       f32,
     anchor_top:   bool,   // true = below top bar, false = above bottom bar
+    scale:        u32,
 }
 
 // ── Per-output state: each monitor gets its own top + bottom surfaces ────────
@@ -699,8 +700,8 @@ impl VitoBar {
     fn create_popup(&mut self, kind: PopupKind, output_idx: usize, num_items: u32, menu_x: f32, anchor_top: bool) {
         self.dismiss_popup();
 
-        let output = match self.outputs.get(output_idx) {
-            Some(o) => &o.output,
+        let (output, scale) = match self.outputs.get(output_idx) {
+            Some(o) => (&o.output, o.scale),
             None => return,
         };
 
@@ -728,12 +729,18 @@ impl VitoBar {
             height: 0,
             menu_x,
             anchor_top,
+            scale,
         });
     }
 
     fn dismiss_popup(&mut self) {
         if let Some(popup) = self.popup.take() {
-            popup.surface.wl_surface().destroy();
+            // Clone the wl_surface handle before dropping the LayerSurface,
+            // so we can destroy it AFTER the role object is cleaned up.
+            // Destroying wl_surface before its role is a Wayland protocol error.
+            let wl_surf = popup.surface.wl_surface().clone();
+            drop(popup); // drops LayerSurface first (sends role destroy)
+            wl_surf.destroy();
         }
     }
 
@@ -764,7 +771,7 @@ impl VitoBar {
             _ => return,
         };
 
-        let scale = 1u32;
+        let scale = popup.scale.max(1);
         let num_items = popup.num_items;
         let sf = scale as f32;
 
@@ -916,7 +923,16 @@ fn draw_popup_items(
 impl CompositorHandler for VitoBar {
     fn scale_factor_changed(&mut self, _: &Connection, _: &QueueHandle<Self>,
                             surface: &wl_surface::WlSurface, factor: i32) {
-        // Popup doesn't need scale tracking (uses scale 1)
+        if let Some(ref mut popup) = self.popup {
+            if popup.surface.wl_surface() == surface {
+                let new_scale = factor.max(1) as u32;
+                if new_scale != popup.scale {
+                    popup.scale = new_scale;
+                    popup.pool = None; // force re-allocation for new scale
+                }
+                return;
+            }
+        }
         for out in &mut self.outputs {
             let is_mine = out.top_surface.as_ref().map(|s| s.wl_surface() == surface).unwrap_or(false)
                 || out.bot_surface.as_ref().map(|s| s.wl_surface() == surface).unwrap_or(false);

@@ -58,7 +58,10 @@ impl Renderer {
         paint.set_color(Color::from_rgba8(r, g, b, a));
         paint.anti_alias = false;
 
-        let rect = Rect::from_xywh(x, y, w, h).unwrap();
+        let rect = match Rect::from_xywh(x, y, w, h) {
+            Some(r) => r,
+            None => return,
+        };
         let path = PathBuilder::from_rect(rect);
         self.pixmap.fill_path(
             &path,
@@ -75,7 +78,10 @@ impl Renderer {
         paint.set_color(Color::from_rgba8(r, g, b, a));
         paint.anti_alias = false;
 
-        let rect = Rect::from_xywh(x, y, w, h).unwrap();
+        let rect = match Rect::from_xywh(x, y, w, h) {
+            Some(r) => r,
+            None => return,
+        };
         let path = PathBuilder::from_rect(rect);
         let stroke = Stroke {
             width: stroke_width,

@@ -311,7 +311,17 @@ impl LauncherApp {
 impl CompositorHandler for LauncherApp {
     fn scale_factor_changed(&mut self, _: &Connection, _: &QueueHandle<Self>,
                             _: &wl_surface::WlSurface, factor: i32) {
-        self.scale = factor.max(1) as u32;
+        let new_scale = (factor.max(1) as u32).max(2);
+        if new_scale != self.scale {
+            self.scale = new_scale;
+            // Re-allocate pool for new scale
+            let size = self.width as usize * self.height as usize
+                       * 4 * (new_scale as usize * new_scale as usize) * 2;
+            self.pool = Some(SlotPool::new(size, &self.shm).expect("pool"));
+            if self.configured {
+                self.draw();
+            }
+        }
     }
     fn transform_changed(&mut self, _: &Connection, _: &QueueHandle<Self>,
                          _: &wl_surface::WlSurface, _: wl_output::Transform) {}
@@ -342,7 +352,8 @@ impl LayerShellHandler for LauncherApp {
 
         if !self.configured {
             self.configured = true;
-            let size = self.width as usize * self.height as usize * 4 * 4;
+            let s = self.scale as usize;
+            let size = self.width as usize * self.height as usize * 4 * s * s * 2;
             self.pool = Some(SlotPool::new(size, &self.shm).expect("pool"));
         }
         self.draw();
@@ -612,7 +623,7 @@ fn main() {
         pool:    None,
         conn:    conn.clone(),
         qh:      qh.clone(),
-        scale:   1,
+        scale:   2,
         width:   1920,  // fallback, will be overridden by configure
         height:  1080,
         configured: false,
