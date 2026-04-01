@@ -56,7 +56,7 @@ enum BarAction {
     ToggleFloating { id: u64 },
     MoveToWorkspace { window_id: u64, ws_idx: u8 },
     // System tray actions
-    TrayActivate    { service: String, id: String },
+    TrayActivate    { service: String, id: String, sni_path: String },
     TrayShowMenu    { tray_idx: usize },
     TrayMenuItem     { tray_idx: usize, menu_id: i32 },
 }
@@ -147,9 +147,9 @@ fn fire_action(action: BarAction) {
                 }
             });
         }
-        BarAction::TrayActivate { service, id } => {
+        BarAction::TrayActivate { service, id, sni_path } => {
             std::thread::spawn(move || {
-                tray::activate_item_by_service(&service, &id);
+                tray::activate_item_by_service(&service, &id, &sni_path);
             });
         }
         // TrayShowMenu and TrayMenuItem handled inline in VitoBar methods
@@ -463,6 +463,7 @@ fn draw_top_on(
             action: BarAction::TrayActivate {
                 service: tray_item.service.clone(),
                 id: tray_item.id.clone(),
+                sni_path: tray_item.sni_path.clone(),
             },
         });
 
@@ -791,15 +792,20 @@ impl VitoBar {
             Some(p) => p,
             None => {
                 let size = ow as usize * oh as usize * 4;
-                popup.pool = Some(SlotPool::new(size, shm).expect("popup pool"));
-                popup.pool.as_mut().unwrap()
+                match SlotPool::new(size, shm) {
+                    Ok(p) => { popup.pool = Some(p); popup.pool.as_mut().unwrap() }
+                    Err(e) => { log::error!("popup pool alloc failed: {e}"); return; }
+                }
             }
         };
 
         let stride = ow as i32 * 4;
-        let (buffer, canvas) = pool
+        let (buffer, canvas) = match pool
             .create_buffer(ow as i32, oh as i32, stride, wl_shm::Format::Argb8888)
-            .expect("popup buffer");
+        {
+            Ok(bc) => bc,
+            Err(e) => { log::error!("popup buffer alloc failed: {e}"); return; }
+        };
 
         let mut r = Renderer::new(ow, oh);
         // Don't clear — leave transparent (Pixmap::new is all zeros = transparent)
@@ -1171,7 +1177,7 @@ impl PointerHandler for VitoBar {
                         if let Some(hit) = hits.iter().find(|h| {
                             lx >= h.x && lx < h.x + h.w && ly >= h.y && ly < h.y + h.h
                         }) {
-                            if let BarAction::TrayActivate { ref service, ref id } = hit.action {
+                            if let BarAction::TrayActivate { ref service, ref id, .. } = hit.action {
                                 let tray_items = self.tray_state.lock()
                                     .unwrap_or_else(|e| e.into_inner());
                                 if let Some(idx) = tray_items.iter().position(|t| t.service == *service && t.id == *id) {

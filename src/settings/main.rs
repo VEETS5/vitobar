@@ -214,6 +214,15 @@ impl SettingsApp {
         let cw  = pw as f32 - cx - CONTENT_PAD * sf;
         let cty = th;
 
+        // Content area border
+        let content_border_x = sidebar_w + 6.0 * sf;
+        let content_border_y = cty + 4.0 * sf;
+        let content_border_w = pw as f32 - content_border_x - 6.0 * sf;
+        let content_border_h = ph as f32 - content_border_y - 6.0 * sf;
+        r.draw_rect_outline(content_border_x, content_border_y,
+            content_border_w, content_border_h,
+            &self.config.colors.base02, 1.0 * sf);
+
         // Category title
         r.draw_text(
             self.active_category.label(),

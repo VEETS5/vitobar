@@ -130,10 +130,12 @@ fn get_battery_status() -> String {
 }
 
 fn get_wifi_ssid() -> String {
+    // Use --rescan no to avoid triggering a WiFi scan that blocks the UI thread
     let out = std::process::Command::new("nmcli")
-        .args(["-t", "-f", "active,ssid", "dev", "wifi"])
+        .args(["-t", "-f", "active,ssid", "dev", "wifi", "list", "--rescan", "no"])
         .output().ok();
     out.and_then(|o| {
+        if !o.status.success() { return None; }
         let text = String::from_utf8_lossy(&o.stdout).to_string();
         text.lines()
             .find(|l| l.starts_with("yes:"))
@@ -179,8 +181,8 @@ fn get_default_sink_name() -> String {
 }
 
 fn get_bt_paired_devices() -> Vec<String> {
-    let out = std::process::Command::new("bluetoothctl")
-        .args(["paired-devices"]).output().ok();
+    let out = std::process::Command::new("timeout")
+        .args(["2", "bluetoothctl", "paired-devices"]).output().ok();
     out.map(|o| {
         String::from_utf8_lossy(&o.stdout)
             .lines()
@@ -330,7 +332,7 @@ pub fn build_widgets(cat: Category, config: &crate::config::Config) -> Vec<Widge
                 Widget::Toggle {
                     label:   "Power".into(),
                     value:   bt.powered,
-                    cmd_on:  "bluetoothctl power on",
+                    cmd_on:  "rfkill unblock bluetooth && bluetoothctl power on",
                     cmd_off: "bluetoothctl power off",
                 },
                 Widget::InfoRow {
@@ -343,7 +345,7 @@ pub fn build_widgets(cat: Category, config: &crate::config::Config) -> Vec<Widge
                 },
                 Widget::Button {
                     label: "\u{f002}  Scan for Devices".into(),
-                    cmd:   "bluetoothctl scan on".into(),
+                    cmd:   "timeout 10 bluetoothctl scan on".into(),
                 },
             ];
             let paired = get_bt_paired_devices();
@@ -548,14 +550,10 @@ pub fn apply_widget_action(widget: &mut Widget, new_value: f32) -> WidgetResult 
 }
 
 fn run_cmd(cmd: &str) {
-    let parts: Vec<&str> = cmd.splitn(2, ' ').collect();
-    if parts.is_empty() { return; }
-    let prog = parts[0];
-    let mut c = std::process::Command::new(prog);
-    if parts.len() > 1 {
-        c.args(parts[1].split_whitespace());
-    }
-    c.spawn().ok();
+    // Use sh -c to support compound commands (&&, ||, pipes, etc.)
+    std::process::Command::new("sh")
+        .args(["-c", cmd])
+        .spawn().ok();
 }
 
 fn is_night_light_on() -> bool {
@@ -634,18 +632,18 @@ struct BtInfo {
 }
 
 fn get_bt_info() -> BtInfo {
-    let show = std::process::Command::new("bluetoothctl")
-        .args(["show"]).output().ok();
+    let show = std::process::Command::new("timeout")
+        .args(["2", "bluetoothctl", "show"]).output().ok();
     let powered = show.as_ref()
-        .map(|o| String::from_utf8_lossy(&o.stdout).contains("Powered: yes"))
+        .map(|o| o.status.success() && String::from_utf8_lossy(&o.stdout).contains("Powered: yes"))
         .unwrap_or(false);
 
     if !powered {
         return BtInfo { powered: false, status_text: "Off".into() };
     }
 
-    let info = std::process::Command::new("bluetoothctl")
-        .args(["info"]).output().ok();
+    let info = std::process::Command::new("timeout")
+        .args(["2", "bluetoothctl", "info"]).output().ok();
     if let Some(out) = info {
         let text = String::from_utf8_lossy(&out.stdout).to_string();
         if text.contains("Connected: yes") {

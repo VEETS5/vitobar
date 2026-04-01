@@ -17,18 +17,19 @@ impl Default for BluetoothState {
 }
 
 pub fn get_bluetooth() -> BluetoothState {
-    let powered = std::process::Command::new("bluetoothctl")
-        .args(["show"])
+    // Use timeout to prevent blocking the bar if bluetooth service is unresponsive
+    let powered = std::process::Command::new("timeout")
+        .args(["2", "bluetoothctl", "show"])
         .output()
-        .map(|o| String::from_utf8_lossy(&o.stdout).contains("Powered: yes"))
+        .map(|o| o.status.success() && String::from_utf8_lossy(&o.stdout).contains("Powered: yes"))
         .unwrap_or(false);
 
     if !powered {
         return BluetoothState { status: BluetoothStatus::Off };
     }
 
-    let info_out = std::process::Command::new("bluetoothctl")
-        .args(["info"])
+    let info_out = std::process::Command::new("timeout")
+        .args(["2", "bluetoothctl", "info"])
         .output()
         .ok();
 

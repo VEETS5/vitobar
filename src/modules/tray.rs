@@ -17,6 +17,7 @@ pub struct TrayItem {
     pub icon_size:  u32,             // side length when icon_rgba is Some
     pub menu_path:  String,          // D-Bus object path for com.canonical.dbusmenu
     pub service:    String,          // D-Bus bus name
+    pub sni_path:   String,          // D-Bus object path for StatusNotifierItem
 }
 
 #[derive(Debug, Clone)]
@@ -275,6 +276,7 @@ async fn run_watcher(tray_state: TrayState) -> zbus::Result<()> {
                 icon_size,
                 menu_path,
                 service: bus_name,
+                sni_path: obj_path,
             });
         }
 
@@ -334,14 +336,17 @@ async fn fetch_menu_items_async(item: &TrayItem) -> Vec<MenuItem> {
         Err(_) => return Vec::new(),
     };
 
-    let proxy = match DbusmenuProxyProxy::builder(&conn)
+    let builder = match DbusmenuProxyProxy::builder(&conn)
         .destination(item.service.as_str())
-        .unwrap()
-        .path(item.menu_path.as_str())
-        .unwrap()
-        .build()
-        .await
     {
+        Ok(b) => b,
+        Err(e) => { log::debug!("tray: invalid menu dest {}: {e}", item.service); return Vec::new(); }
+    };
+    let builder = match builder.path(item.menu_path.as_str()) {
+        Ok(b) => b,
+        Err(e) => { log::debug!("tray: invalid menu path {}: {e}", item.menu_path); return Vec::new(); }
+    };
+    let proxy = match builder.build().await {
         Ok(p) => p,
         Err(e) => {
             log::debug!("tray: menu proxy failed for {}: {e}", item.id);
@@ -413,14 +418,17 @@ pub fn activate_menu_item(item: &TrayItem, menu_id: i32) {
             Err(_) => return,
         };
 
-        let proxy = match DbusmenuProxyProxy::builder(&conn)
+        let builder = match DbusmenuProxyProxy::builder(&conn)
             .destination(item.service.as_str())
-            .unwrap()
-            .path(item.menu_path.as_str())
-            .unwrap()
-            .build()
-            .await
         {
+            Ok(b) => b,
+            Err(_) => return,
+        };
+        let builder = match builder.path(item.menu_path.as_str()) {
+            Ok(b) => b,
+            Err(_) => return,
+        };
+        let proxy = match builder.build().await {
             Ok(p) => p,
             Err(_) => return,
         };
@@ -434,9 +442,10 @@ pub fn activate_menu_item(item: &TrayItem, menu_id: i32) {
     });
 }
 
-/// Left-click activate a tray item by service name (blocking, call from any thread).
-pub fn activate_item_by_service(service: &str, _id: &str) {
+/// Left-click activate a tray item (blocking, call from any thread).
+pub fn activate_item_by_service(service: &str, _id: &str, sni_path: &str) {
     let service = service.to_string();
+    let sni_path = sni_path.to_string();
     let rt = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build();
@@ -449,14 +458,17 @@ pub fn activate_item_by_service(service: &str, _id: &str) {
             Ok(c) => c,
             Err(_) => return,
         };
-        if let Ok(proxy) = StatusNotifierItemProxy::builder(&conn)
+        let builder = match StatusNotifierItemProxy::builder(&conn)
             .destination(service.as_str())
-            .unwrap()
-            .path("/StatusNotifierItem")
-            .unwrap()
-            .build()
-            .await
         {
+            Ok(b) => b,
+            Err(e) => { log::debug!("tray activate: invalid dest {service}: {e}"); return; }
+        };
+        let builder = match builder.path(sni_path.as_str()) {
+            Ok(b) => b,
+            Err(e) => { log::debug!("tray activate: invalid path {sni_path}: {e}"); return; }
+        };
+        if let Ok(proxy) = builder.build().await {
             let _ = proxy.activate(0, 0).await;
         }
     });
