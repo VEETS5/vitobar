@@ -8,6 +8,7 @@ use modules::{
     clock::get_time_string,
     sysinfo::{SysMonitor, SysStats},
     bluetooth::BluetoothStatus,
+    tray::{self, TrayState, TrayItem},
 };
 use render::Renderer;
 
@@ -47,6 +48,16 @@ enum BarAction {
     FocusWorkspace { id: u64 },
     FocusWindow    { id: u64 },
     Spawn          { cmd: String },
+    // Right-click context menu actions
+    CloseWindow    { id: u64 },
+    MaximizeColumn,
+    FullscreenWindow { id: u64 },
+    ToggleFloating { id: u64 },
+    MoveToWorkspace { window_id: u64, ws_idx: u8 },
+    // System tray actions
+    TrayActivate    { service: String, id: String },
+    TrayShowMenu    { tray_idx: usize },
+    TrayMenuItem     { tray_idx: usize, menu_id: i32 },
 }
 
 #[derive(Debug, Clone)]
@@ -80,6 +91,69 @@ fn fire_action(action: BarAction) {
         BarAction::Spawn { cmd } => {
             std::process::Command::new(&cmd).spawn().ok();
         }
+        BarAction::CloseWindow { id } => {
+            std::thread::spawn(move || {
+                if let Ok(mut s) = NiriSocket::connect() {
+                    let _ = s.send(NiriRequest::Action(
+                        niri_ipc::Action::CloseWindow { id: Some(id) },
+                    ));
+                }
+            });
+        }
+        BarAction::MaximizeColumn => {
+            std::thread::spawn(move || {
+                if let Ok(mut s) = NiriSocket::connect() {
+                    let _ = s.send(NiriRequest::Action(
+                        niri_ipc::Action::MaximizeColumn {},
+                    ));
+                }
+            });
+        }
+        BarAction::FullscreenWindow { id } => {
+            std::thread::spawn(move || {
+                if let Ok(mut s) = NiriSocket::connect() {
+                    let _ = s.send(NiriRequest::Action(
+                        niri_ipc::Action::FullscreenWindow { id: Some(id) },
+                    ));
+                }
+            });
+        }
+        BarAction::ToggleFloating { id } => {
+            std::thread::spawn(move || {
+                if let Ok(mut s) = NiriSocket::connect() {
+                    let _ = s.send(NiriRequest::Action(
+                        niri_ipc::Action::ToggleWindowFloating { id: Some(id) },
+                    ));
+                }
+            });
+        }
+        BarAction::MoveToWorkspace { window_id, ws_idx } => {
+            std::thread::spawn(move || {
+                if let Ok(mut s) = NiriSocket::connect() {
+                    // Focus the window first so niri targets it
+                    let _ = s.send(NiriRequest::Action(
+                        niri_ipc::Action::FocusWindow { id: window_id },
+                    ));
+                }
+                if let Ok(mut s) = NiriSocket::connect() {
+                    let _ = s.send(NiriRequest::Action(
+                        niri_ipc::Action::MoveWindowToWorkspace {
+                            window_id: Some(window_id),
+                            reference: niri_ipc::WorkspaceReferenceArg::Index(ws_idx),
+                            focus: true,
+                        },
+                    ));
+                }
+            });
+        }
+        BarAction::TrayActivate { service, id } => {
+            std::thread::spawn(move || {
+                tray::activate_item_by_service(&service, &id);
+            });
+        }
+        // TrayShowMenu and TrayMenuItem handled inline in VitoBar methods
+        BarAction::TrayShowMenu { .. }
+        | BarAction::TrayMenuItem { .. } => {}
     }
 }
 
@@ -89,6 +163,27 @@ use std::time::Duration;
 
 const BAR_HEIGHT:     u32 = 22;
 const TASKBAR_HEIGHT: u32 = 22;
+const POPUP_WIDTH:    u32 = 160;
+const POPUP_ITEM_H:   u32 = 22;
+const POPUP_ITEMS:    u32 = 9; // Close, Maximize, Fullscreen, Float, WS 1-5
+const POPUP_HEIGHT:   u32 = POPUP_ITEM_H * POPUP_ITEMS;
+
+#[derive(Clone)]
+enum PopupKind {
+    WindowMenu { window_id: u64 },
+    TrayMenu   { item: TrayItem, menu_items: Vec<tray::MenuItem> },
+}
+
+struct PopupState {
+    kind:         PopupKind,
+    surface:      LayerSurface,
+    pool:         Option<SlotPool>,
+    configured:   bool,
+    hits:         Vec<HitRegion>,
+    pointer_pos:  (f64, f64),
+    pointer_inside: bool,
+    num_items:    u32,
+}
 
 // ── Per-output state: each monitor gets its own top + bottom surfaces ────────
 
@@ -107,6 +202,7 @@ struct PerOutput {
     bot_configured: bool,
 
     top_hits:        Vec<HitRegion>,
+    top_tray_hits:   Vec<(usize, HitRegion)>,  // (tray_idx, region) for right-click
     bot_hits:        Vec<HitRegion>,
     top_pointer_pos: (f64, f64),
     bot_pointer_pos: (f64, f64),
@@ -134,6 +230,10 @@ struct VitoBar {
 
     seat_state:      SeatState,
     pointer:         Option<wl_pointer::WlPointer>,
+    popup:           Option<PopupState>,
+    tray_state:      TrayState,
+    tray_menu_tx:    calloop::channel::Sender<(usize, Vec<tray::MenuItem>)>,
+    pending_tray_popup: Option<(TrayItem, usize)>, // (item, output_idx)
 }
 
 fn sort_windows_by_position(windows: &mut Vec<niri_ipc::Window>, ws_map: &HashMap<u64, u8>) {
@@ -154,6 +254,7 @@ fn draw_top_on(
     _windows_ordered: &[niri_ipc::Window],
     conn: &Connection,
     shm: &Shm,
+    tray_items: &[TrayItem],
 ) {
     let width  = out.width;
     let height = BAR_HEIGHT;
@@ -304,9 +405,9 @@ fn draw_top_on(
 
     status_block!( 74.0, "\u{f1c0}", &format!(" {:.1}G",  stats.ram_gb),         &config.colors.base0d, "vitosettings");
 
-    // ── Background apps tray (running processes without niri windows) ───
+    // ── System tray (StatusNotifierItem icons) ────────────────────────
     rx -= gap;
-    for app_id in &stats.background_apps {
+    for (ti, tray_item) in tray_items.iter().enumerate() {
         let icon_block_w = 22.0 * sf;
         if rx - icon_block_w < x + 40.0 * sf { break; }
         rx -= icon_block_w;
@@ -317,13 +418,46 @@ fn draw_top_on(
         let icon_phys = (14.0 * sf) as u32;
         let icon_x = (rx + (icon_block_w - 14.0 * sf) / 2.0) as u32;
         let icon_y = (pad + (bh - 14.0 * sf) / 2.0) as u32;
-        if let Some(rgba) = icons::load(app_id, icon_phys) {
-            r.draw_icon(icon_x, icon_y, icon_phys, &rgba);
-        } else {
-            let glyph = app_icon(app_id);
+
+        let mut drawn = false;
+        // Prefer pixmap from D-Bus if available
+        if let Some(ref rgba) = tray_item.icon_rgba {
+            if tray_item.icon_size > 0 {
+                // Scale the SNI pixmap to our target size
+                let scaled = scale_icon(rgba, tray_item.icon_size, icon_phys);
+                r.draw_icon(icon_x, icon_y, icon_phys, &scaled);
+                drawn = true;
+            }
+        }
+        // Fall back to icon_name → XDG icon lookup
+        if !drawn && !tray_item.icon_name.is_empty() {
+            if let Some(rgba) = icons::load(&tray_item.icon_name, icon_phys) {
+                r.draw_icon(icon_x, icon_y, icon_phys, &rgba);
+                drawn = true;
+            }
+        }
+        // Fall back to app_id → XDG icon lookup
+        if !drawn {
+            if let Some(rgba) = icons::load(&tray_item.id, icon_phys) {
+                r.draw_icon(icon_x, icon_y, icon_phys, &rgba);
+                drawn = true;
+            }
+        }
+        // Last resort: font glyph
+        if !drawn {
+            let glyph = app_icon(&tray_item.id);
             let gw = r.measure_text(glyph, fsz);
             r.draw_text(glyph, rx + (icon_block_w - gw) / 2.0, pad + bh * 0.82, fsz, &config.colors.base05);
         }
+
+        // Hit region: left-click activates, right-click shows menu
+        hits.push(HitRegion {
+            x: rx / sf, y: 2.0, w: icon_block_w / sf, h: 18.0,
+            action: BarAction::TrayActivate {
+                service: tray_item.service.clone(),
+                id: tray_item.id.clone(),
+            },
+        });
 
         rx -= gap;
     }
@@ -491,13 +625,14 @@ fn draw_bot_on(
 
 impl VitoBar {
     fn redraw_all_tops(&mut self) {
+        let tray_items = self.tray_state.lock().unwrap().clone();
         let VitoBar {
             ref mut outputs, ref config, ref niri_state, ref stats,
             ref windows_ordered, ref conn, ref shm, ..
         } = *self;
         for out in outputs.iter_mut() {
             if out.top_configured {
-                draw_top_on(out, config, niri_state, stats, windows_ordered, conn, shm);
+                draw_top_on(out, config, niri_state, stats, windows_ordered, conn, shm, &tray_items);
             }
         }
     }
@@ -515,13 +650,14 @@ impl VitoBar {
     }
 
     fn redraw_output_top(&mut self, idx: usize) {
+        let tray_items = self.tray_state.lock().unwrap().clone();
         let VitoBar {
             ref mut outputs, ref config, ref niri_state, ref stats,
             ref windows_ordered, ref conn, ref shm, ..
         } = *self;
         if let Some(out) = outputs.get_mut(idx) {
             if out.top_configured {
-                draw_top_on(out, config, niri_state, stats, windows_ordered, conn, shm);
+                draw_top_on(out, config, niri_state, stats, windows_ordered, conn, shm, &tray_items);
             }
         }
     }
@@ -537,6 +673,200 @@ impl VitoBar {
             }
         }
     }
+
+    fn show_popup(&mut self, window_id: u64, output_idx: usize) {
+        self.create_popup(PopupKind::WindowMenu { window_id }, output_idx, POPUP_ITEMS, Anchor::BOTTOM | Anchor::LEFT, TASKBAR_HEIGHT as i32);
+    }
+
+    fn create_popup(&mut self, kind: PopupKind, output_idx: usize, num_items: u32, anchor: Anchor, margin_from_edge: i32) {
+        self.dismiss_popup();
+
+        let output = match self.outputs.get(output_idx) {
+            Some(o) => &o.output,
+            None => return,
+        };
+
+        let height = POPUP_ITEM_H * num_items;
+        let popup_wl = self.compositor.create_surface(&self.qh);
+        let popup = self.layer_shell.create_layer_surface(
+            &self.qh, popup_wl, Layer::Overlay,
+            Some("vitobar-popup"), Some(output),
+        );
+        popup.set_anchor(anchor);
+        popup.set_size(POPUP_WIDTH, height);
+        popup.set_exclusive_zone(-1);
+        if anchor.contains(Anchor::BOTTOM) {
+            popup.set_margin(0, 0, margin_from_edge, 0);
+        } else if anchor.contains(Anchor::TOP) {
+            popup.set_margin(margin_from_edge, 0, 0, 0);
+        }
+        popup.set_keyboard_interactivity(KeyboardInteractivity::None);
+        popup.commit();
+
+        self.popup = Some(PopupState {
+            kind,
+            surface: popup,
+            pool: None,
+            configured: false,
+            hits: Vec::new(),
+            pointer_pos: (0.0, 0.0),
+            pointer_inside: false,
+            num_items,
+        });
+    }
+
+    fn dismiss_popup(&mut self) {
+        if let Some(popup) = self.popup.take() {
+            popup.surface.wl_surface().destroy();
+        }
+    }
+
+    fn show_tray_popup(&mut self, item: TrayItem, output_idx: usize) {
+        // Fetch menu in background thread, then send results via channel
+        let tx = self.tray_menu_tx.clone();
+        let tray_items = self.tray_state.lock().unwrap().clone();
+        let tray_idx = tray_items.iter().position(|t| t.service == item.service && t.id == item.id).unwrap_or(0);
+        let item_clone = item.clone();
+
+        std::thread::spawn(move || {
+            let menu_items = tray::fetch_menu_items(&item_clone);
+            let _ = tx.send((tray_idx, menu_items));
+        });
+
+        // Store output_idx for when menu arrives — we'll create the popup then
+        // For now, dismiss any existing popup
+        self.dismiss_popup();
+        // Store a pending tray popup request
+        self.pending_tray_popup = Some((item, output_idx));
+    }
+
+    fn draw_popup(&mut self) {
+        let VitoBar {
+            ref mut popup, ref config, ref conn, ref shm, ..
+        } = *self;
+
+        let popup = match popup.as_mut() {
+            Some(p) if p.configured => p,
+            _ => return,
+        };
+
+        let scale = 1u32;
+        let num_items = popup.num_items;
+        let pw = POPUP_WIDTH * scale;
+        let ph = POPUP_ITEM_H * num_items * scale;
+        let sf = scale as f32;
+        let pointer_pos = popup.pointer_pos;
+        let kind = popup.kind.clone();
+
+        let pool = match popup.pool.as_mut() {
+            Some(p) => p,
+            None => {
+                let size = pw as usize * ph as usize * 4;
+                popup.pool = Some(SlotPool::new(size, shm).expect("popup pool"));
+                popup.pool.as_mut().unwrap()
+            }
+        };
+
+        let stride = pw as i32 * 4;
+        let (buffer, canvas) = pool
+            .create_buffer(pw as i32, ph as i32, stride, wl_shm::Format::Argb8888)
+            .expect("popup buffer");
+
+        let mut r = Renderer::new(pw, ph);
+        r.clear(&config.colors.base00);
+        r.draw_rect_outline(0.0, 0.0, pw as f32, ph as f32, &config.colors.base03, 1.5 * sf);
+
+        let fsz = config.font_size.unwrap_or(11.0) * sf;
+        let mut hits: Vec<HitRegion> = Vec::new();
+
+        match kind {
+            PopupKind::WindowMenu { window_id } => {
+                let items: Vec<(&str, &str, BarAction)> = vec![
+                    ("\u{f00d}", " Close",      BarAction::CloseWindow { id: window_id }),
+                    ("\u{f2d0}", " Maximize",   BarAction::MaximizeColumn),
+                    ("\u{f065}", " Fullscreen", BarAction::FullscreenWindow { id: window_id }),
+                    ("\u{f24d}", " Float/Tile", BarAction::ToggleFloating { id: window_id }),
+                    ("\u{f6d7}", " \u{2192} WS 1", BarAction::MoveToWorkspace { window_id, ws_idx: 1 }),
+                    ("\u{f6d7}", " \u{2192} WS 2", BarAction::MoveToWorkspace { window_id, ws_idx: 2 }),
+                    ("\u{f6d7}", " \u{2192} WS 3", BarAction::MoveToWorkspace { window_id, ws_idx: 3 }),
+                    ("\u{f6d7}", " \u{2192} WS 4", BarAction::MoveToWorkspace { window_id, ws_idx: 4 }),
+                    ("\u{f6d7}", " \u{2192} WS 5", BarAction::MoveToWorkspace { window_id, ws_idx: 5 }),
+                ];
+                draw_popup_items(&mut r, pointer_pos, &items, config, fsz, sf, pw, &mut hits, num_items);
+            }
+            PopupKind::TrayMenu { item: _, ref menu_items } => {
+                let items: Vec<(String, String, BarAction)> = menu_items.iter()
+                    .filter(|m| !m.is_separator && !m.label.is_empty())
+                    .map(|m| {
+                        (
+                            "\u{f0da}".to_string(),
+                            format!(" {}", m.label),
+                            BarAction::TrayMenuItem { tray_idx: 0, menu_id: m.id },
+                        )
+                    })
+                    .collect();
+                let refs: Vec<(&str, &str, BarAction)> = items.iter()
+                    .map(|(i, l, a)| (i.as_str(), l.as_str(), a.clone()))
+                    .collect();
+                draw_popup_items(&mut r, pointer_pos, &refs, config, fsz, sf, pw, &mut hits, num_items);
+            }
+        }
+
+        popup.hits = hits;
+
+        let bgra = r.as_bgra();
+        let len = canvas.len().min(bgra.len());
+        canvas[..len].copy_from_slice(&bgra[..len]);
+
+        popup.surface.wl_surface().set_buffer_scale(scale as i32);
+        popup.surface.wl_surface().damage_buffer(0, 0, pw as i32, ph as i32);
+        buffer.attach_to(popup.surface.wl_surface()).expect("popup attach");
+        popup.surface.commit();
+        conn.flush().ok();
+    }
+}
+
+fn draw_popup_items(
+    r: &mut Renderer,
+    pointer_pos: (f64, f64),
+    items: &[(&str, &str, BarAction)],
+    config: &Config,
+    fsz: f32,
+    sf: f32,
+    pw: u32,
+    hits: &mut Vec<HitRegion>,
+    num_items: u32,
+) {
+    let item_h = POPUP_ITEM_H as f32 * sf;
+    let pad_x  = 6.0 * sf;
+    for (i, (icon, label, action)) in items.iter().enumerate() {
+        let y = i as f32 * item_h;
+
+        let (px, py) = pointer_pos;
+        let hovered = px >= 0.0 && px < POPUP_WIDTH as f64
+            && py >= y as f64 && py < (y + item_h) as f64;
+        let (bg, fg) = if hovered {
+            (&config.colors.base02, &config.colors.base07)
+        } else {
+            (&config.colors.base00, &config.colors.base05)
+        };
+        r.draw_rect(1.0, y, pw as f32 - 2.0, item_h, bg);
+
+        let icon_col = if i == 0 { &config.colors.base08 } else { &config.colors.base0d };
+        let text_y = y + item_h * 0.75;
+        let iw = r.measure_text(icon, fsz);
+        r.draw_text(icon, pad_x, text_y, fsz, icon_col);
+        r.draw_text(label, pad_x + iw, text_y, fsz, fg);
+
+        if i < num_items as usize - 1 {
+            r.draw_rect(4.0 * sf, y + item_h - 1.0, pw as f32 - 8.0 * sf, 1.0, &config.colors.base01);
+        }
+
+        hits.push(HitRegion {
+            x: 0.0, y: y / sf, w: POPUP_WIDTH as f32, h: POPUP_ITEM_H as f32,
+            action: action.clone(),
+        });
+    }
 }
 
 // ── Trait implementations required by SCTK ──────────────────────────────────
@@ -544,6 +874,7 @@ impl VitoBar {
 impl CompositorHandler for VitoBar {
     fn scale_factor_changed(&mut self, _: &Connection, _: &QueueHandle<Self>,
                             surface: &wl_surface::WlSurface, factor: i32) {
+        // Popup doesn't need scale tracking (uses scale 1)
         for out in &mut self.outputs {
             let is_mine = out.top_surface.as_ref().map(|s| s.wl_surface() == surface).unwrap_or(false)
                 || out.bot_surface.as_ref().map(|s| s.wl_surface() == surface).unwrap_or(false);
@@ -601,6 +932,7 @@ impl OutputHandler for VitoBar {
             top_configured: false,
             bot_configured: false,
             top_hits:        Vec::new(),
+            top_tray_hits:   Vec::new(),
             bot_hits:        Vec::new(),
             top_pointer_pos: (0.0, 0.0),
             bot_pointer_pos: (0.0, 0.0),
@@ -615,12 +947,26 @@ impl OutputHandler for VitoBar {
 }
 
 impl LayerShellHandler for VitoBar {
-    fn closed(&mut self, _: &Connection, _: &QueueHandle<Self>, _: &LayerSurface) {
+    fn closed(&mut self, _: &Connection, _: &QueueHandle<Self>, surface: &LayerSurface) {
+        // Check if the popup was closed
+        if self.popup.as_ref().map(|p| p.surface.wl_surface() == surface.wl_surface()).unwrap_or(false) {
+            self.popup = None;
+            return;
+        }
         self.running = false;
     }
 
     fn configure(&mut self, _conn: &Connection, _qh: &QueueHandle<Self>,
                  surface: &LayerSurface, configure: LayerSurfaceConfigure, _serial: u32) {
+        // Check if this is the popup surface
+        if let Some(ref mut popup) = self.popup {
+            if popup.surface.wl_surface() == surface.wl_surface() {
+                popup.configured = true;
+                self.draw_popup();
+                return;
+            }
+        }
+
         // Find which output owns this surface
         let idx_and_kind = self.outputs.iter().enumerate().find_map(|(i, out)| {
             if out.top_surface.as_ref().map(|s| s.wl_surface() == surface.wl_surface()).unwrap_or(false) {
@@ -678,8 +1024,57 @@ impl PointerHandler for VitoBar {
     fn pointer_frame(&mut self, _: &Connection, _: &QueueHandle<Self>,
                      _: &wl_pointer::WlPointer, events: &[PointerEvent]) {
         use PointerEventKind::*;
+
+        let mut popup_action: Option<BarAction> = None;
+        let mut show_popup: Option<(u64, usize)> = None; // (window_id, output_idx)
+        let mut show_tray_menu: Option<(TrayItem, usize)> = None; // (tray_item, output_idx)
+        let mut dismiss_popup = false;
+        let mut need_popup_redraw = false;
+
         for event in events {
-            for out in &mut self.outputs {
+            // ── Check if event is on the popup surface ──
+            let is_popup = self.popup.as_ref()
+                .map(|p| p.surface.wl_surface() == &event.surface)
+                .unwrap_or(false);
+
+            if is_popup {
+                match &event.kind {
+                    Motion { .. } => {
+                        if let Some(ref mut popup) = self.popup {
+                            popup.pointer_pos = event.position;
+                            popup.pointer_inside = true;
+                            need_popup_redraw = true;
+                        }
+                    }
+                    Leave { .. } => {
+                        if let Some(ref mut popup) = self.popup {
+                            popup.pointer_inside = false;
+                            popup.pointer_pos = (-1.0, -1.0);
+                            need_popup_redraw = true;
+                        }
+                    }
+                    Press { button, .. } if *button == smithay_client_toolkit::seat::pointer::BTN_LEFT => {
+                        if let Some(ref popup) = self.popup {
+                            let (lx, ly) = (popup.pointer_pos.0 as f32, popup.pointer_pos.1 as f32);
+                            let hits = popup.hits.clone();
+                            if let Some(hit) = hits.iter().find(|h| {
+                                lx >= h.x && lx < h.x + h.w && ly >= h.y && ly < h.y + h.h
+                            }) {
+                                popup_action = Some(hit.action.clone());
+                            }
+                        }
+                        dismiss_popup = true;
+                    }
+                    Press { .. } => {
+                        dismiss_popup = true;
+                    }
+                    _ => {}
+                }
+                continue;
+            }
+
+            // ── Normal bar surfaces ──
+            for (out_idx, out) in self.outputs.iter_mut().enumerate() {
                 let is_top = out.top_surface.as_ref()
                     .map(|s| s.wl_surface() == &event.surface).unwrap_or(false);
                 let is_bot = out.bot_surface.as_ref()
@@ -693,6 +1088,10 @@ impl PointerHandler for VitoBar {
                         if is_bot { out.bot_pointer_pos = event.position; }
                     }
                     Press { button, .. } if *button == smithay_client_toolkit::seat::pointer::BTN_LEFT => {
+                        // Dismiss popup on any left click on the bar
+                        if self.popup.is_some() {
+                            dismiss_popup = true;
+                        }
                         let (pos, hits) = if is_top {
                             (out.top_pointer_pos, out.top_hits.clone())
                         } else {
@@ -705,10 +1104,72 @@ impl PointerHandler for VitoBar {
                             fire_action(hit.action.clone());
                         }
                     }
+                    // Right-click on bottom bar → show window context menu
+                    Press { button, .. } if *button == smithay_client_toolkit::seat::pointer::BTN_RIGHT && is_bot => {
+                        let pos = out.bot_pointer_pos;
+                        let hits = out.bot_hits.clone();
+                        let (lx, ly) = (pos.0 as f32, pos.1 as f32);
+                        if let Some(hit) = hits.iter().find(|h| {
+                            lx >= h.x && lx < h.x + h.w && ly >= h.y && ly < h.y + h.h
+                        }) {
+                            if let BarAction::FocusWindow { id } = hit.action {
+                                show_popup = Some((id, out_idx));
+                            }
+                        }
+                    }
+                    // Right-click on top bar tray icon → show tray menu
+                    Press { button, .. } if *button == smithay_client_toolkit::seat::pointer::BTN_RIGHT && is_top => {
+                        let pos = out.top_pointer_pos;
+                        let hits = out.top_hits.clone();
+                        let (lx, ly) = (pos.0 as f32, pos.1 as f32);
+                        if let Some(hit) = hits.iter().find(|h| {
+                            lx >= h.x && lx < h.x + h.w && ly >= h.y && ly < h.y + h.h
+                        }) {
+                            if let BarAction::TrayActivate { ref service, ref id } = hit.action {
+                                // Find the tray item index
+                                let tray_items = self.tray_state.lock().unwrap();
+                                if let Some(idx) = tray_items.iter().position(|t| t.service == *service && t.id == *id) {
+                                    let item = tray_items[idx].clone();
+                                    drop(tray_items);
+                                    show_tray_menu = Some((item, out_idx));
+                                }
+                            }
+                        }
+                    }
                     _ => {}
                 }
                 break;
             }
+        }
+
+        // Apply deferred popup actions
+        if let Some(action) = popup_action {
+            match action {
+                BarAction::TrayMenuItem { menu_id, .. } => {
+                    // Fire the DBusMenu event before dismissing
+                    if let Some(ref popup) = self.popup {
+                        if let PopupKind::TrayMenu { ref item, .. } = popup.kind {
+                            let item = item.clone();
+                            std::thread::spawn(move || {
+                                tray::activate_menu_item(&item, menu_id);
+                            });
+                        }
+                    }
+                }
+                other => fire_action(other),
+            }
+        }
+        if dismiss_popup {
+            self.dismiss_popup();
+        }
+        if let Some((window_id, output_idx)) = show_popup {
+            self.show_popup(window_id, output_idx);
+        }
+        if let Some((tray_item, output_idx)) = show_tray_menu {
+            self.show_tray_popup(tray_item, output_idx);
+        }
+        if need_popup_redraw && !dismiss_popup {
+            self.draw_popup();
         }
     }
 }
@@ -725,6 +1186,29 @@ delegate_shm!(VitoBar);
 delegate_seat!(VitoBar);
 delegate_pointer!(VitoBar);
 delegate_registry!(VitoBar);
+
+/// Nearest-neighbour scale an RGBA icon from src_size to dst_size.
+fn scale_icon(rgba: &[u8], src_size: u32, dst_size: u32) -> Vec<u8> {
+    if src_size == dst_size { return rgba.to_vec(); }
+    let t = dst_size as usize;
+    let s = src_size as usize;
+    let mut out = vec![0u8; t * t * 4];
+    let ratio = s as f32 / t as f32;
+    for dy in 0..t {
+        for dx in 0..t {
+            let sx = ((dx as f32 + 0.5) * ratio) as usize;
+            let sy = ((dy as f32 + 0.5) * ratio) as usize;
+            let sx = sx.min(s - 1);
+            let sy = sy.min(s - 1);
+            let si = (sy * s + sx) * 4;
+            let di = (dy * t + dx) * 4;
+            if si + 3 < rgba.len() && di + 3 < out.len() {
+                out[di..di + 4].copy_from_slice(&rgba[si..si + 4]);
+            }
+        }
+    }
+    out
+}
 
 fn app_icon(app_id: &str) -> &'static str {
     let s = app_id.to_ascii_lowercase();
@@ -801,6 +1285,10 @@ fn main() {
     // Surfaces are created dynamically in new_output() — no manual surface
     // creation here. The OutputHandler will be called for each connected monitor.
 
+    // ── System tray ───────────────────────────────────────────────────
+    let tray_state = tray::spawn_tray_watcher();
+    let (tray_menu_tx, tray_menu_rx) = calloop_channel::<(usize, Vec<tray::MenuItem>)>();
+
     let mut app = VitoBar {
         registry_state: RegistryState::new(&globals),
         output_state,
@@ -818,6 +1306,10 @@ fn main() {
         windows_ordered,
         seat_state,
         pointer:     None,
+        popup:       None,
+        tray_state,
+        tray_menu_tx,
+        pending_tray_popup: None,
     };
 
     // ── Event loop ──────────────────────────────────────────────────────
@@ -928,6 +1420,22 @@ fn main() {
             if redraw_bot { app.redraw_all_bots(); }
         })
         .expect("niri channel");
+
+    // ── Tray menu results channel ─────────────────────────────────────
+    event_loop.handle()
+        .insert_source(tray_menu_rx, |ev, _, app: &mut VitoBar| {
+            let ChannelEvent::Msg((_tray_idx, menu_items)) = ev else { return; };
+            if let Some((item, output_idx)) = app.pending_tray_popup.take() {
+                let visible: Vec<_> = menu_items.iter()
+                    .filter(|m| !m.is_separator && !m.label.is_empty())
+                    .cloned()
+                    .collect();
+                let count = visible.len().max(1) as u32;
+                let kind = PopupKind::TrayMenu { item, menu_items: visible };
+                app.create_popup(kind, output_idx, count, Anchor::TOP | Anchor::LEFT, BAR_HEIGHT as i32);
+            }
+        })
+        .expect("tray menu channel");
 
     // ── Sysinfo + clock: redraw tops every 5 s ─────────────────────────
     event_loop.handle()

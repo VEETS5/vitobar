@@ -52,3 +52,7 @@ fontdue = "0.9"
 
 # PNG decoding (app icons)
 png = "0.17"
+
+# D-Bus for system tray (StatusNotifierItem)
+zbus = { version = "5", default-features = false, features = ["tokio"] }
+tokio = { version = "1", features = ["rt", "sync", "time"] }
