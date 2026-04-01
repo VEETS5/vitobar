@@ -640,7 +640,8 @@ fn draw_bot_on(
 
 impl VitoBar {
     fn redraw_all_tops(&mut self) {
-        let tray_items = self.tray_state.lock().unwrap().clone();
+        let tray_items = self.tray_state.lock()
+            .unwrap_or_else(|e| e.into_inner()).clone();
         let VitoBar {
             ref mut outputs, ref config, ref niri_state, ref stats,
             ref windows_ordered, ref conn, ref shm, ..
@@ -665,7 +666,8 @@ impl VitoBar {
     }
 
     fn redraw_output_top(&mut self, idx: usize) {
-        let tray_items = self.tray_state.lock().unwrap().clone();
+        let tray_items = self.tray_state.lock()
+            .unwrap_or_else(|e| e.into_inner()).clone();
         let VitoBar {
             ref mut outputs, ref config, ref niri_state, ref stats,
             ref windows_ordered, ref conn, ref shm, ..
@@ -737,7 +739,8 @@ impl VitoBar {
     fn show_tray_popup(&mut self, item: TrayItem, output_idx: usize, click_x: f32) {
         // Fetch menu in background thread, then send results via channel
         let tx = self.tray_menu_tx.clone();
-        let tray_items = self.tray_state.lock().unwrap().clone();
+        let tray_items = self.tray_state.lock()
+            .unwrap_or_else(|e| e.into_inner()).clone();
         let tray_idx = tray_items.iter().position(|t| t.service == item.service && t.id == item.id).unwrap_or(0);
         let item_clone = item.clone();
 
@@ -1169,7 +1172,8 @@ impl PointerHandler for VitoBar {
                             lx >= h.x && lx < h.x + h.w && ly >= h.y && ly < h.y + h.h
                         }) {
                             if let BarAction::TrayActivate { ref service, ref id } = hit.action {
-                                let tray_items = self.tray_state.lock().unwrap();
+                                let tray_items = self.tray_state.lock()
+                                    .unwrap_or_else(|e| e.into_inner());
                                 if let Some(idx) = tray_items.iter().position(|t| t.service == *service && t.id == *id) {
                                     let item = tray_items[idx].clone();
                                     drop(tray_items);

@@ -39,17 +39,28 @@ pub fn spawn_tray_watcher() -> TrayState {
     let state2 = Arc::clone(&state);
 
     std::thread::spawn(move || {
-        // Build a single-threaded tokio runtime for zbus async
-        let rt = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .expect("tokio runtime for tray");
+        loop {
+            let state3 = Arc::clone(&state2);
+            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                let rt = tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                    .expect("tokio runtime for tray");
 
-        rt.block_on(async move {
-            if let Err(e) = run_watcher(state2).await {
-                log::error!("tray watcher failed: {e}");
+                rt.block_on(async move {
+                    if let Err(e) = run_watcher(state3).await {
+                        log::error!("tray watcher failed: {e}");
+                    }
+                });
+            }));
+            if let Err(e) = result {
+                log::error!("tray watcher panicked: {e:?}");
+                log::info!("tray: restarting watcher in 5s...");
+                std::thread::sleep(std::time::Duration::from_secs(5));
+            } else {
+                break; // normal exit (shouldn't happen, but don't loop)
             }
-        });
+        }
     });
 
     state
@@ -188,17 +199,20 @@ async fn run_watcher(tray_state: TrayState) -> zbus::Result<()> {
 
     log::info!("tray: StatusNotifierWatcher registered on D-Bus");
 
+    // Cache icons so we don't re-fetch large pixmaps every poll cycle
+    let mut icon_cache: HashMap<String, (Option<Vec<u8>>, u32)> = HashMap::new();
+
     // Poll for changes and refresh tray state
     loop {
         tokio::time::sleep(std::time::Duration::from_secs(2)).await;
 
         let item_names: Vec<String> = watcher_inner.lock().unwrap().items.clone();
         let mut new_items: Vec<TrayItem> = Vec::new();
+        let mut alive_names: Vec<String> = Vec::new();
 
         for raw in &item_names {
             // Parse "bus_name/object_path" or just "bus_name"
             let (bus_name, obj_path) = if let Some(idx) = raw.find('/') {
-                // Check if it's like ":1.45/org/ayatana/..." pattern
                 let bn = &raw[..idx];
                 let op = &raw[idx..];
                 (bn.to_string(), op.to_string())
@@ -224,26 +238,35 @@ async fn run_watcher(tray_state: TrayState) -> zbus::Result<()> {
                 }
             };
 
-            let id = proxy.id().await.unwrap_or_default();
+            let id = match proxy.id().await {
+                Ok(id) => id,
+                Err(_) => continue, // service is gone
+            };
             let title = proxy.title().await.unwrap_or_else(|_| id.clone());
             let icon_name = proxy.icon_name().await.unwrap_or_default();
             let menu_path = proxy.menu().await
                 .map(|p| p.to_string())
                 .unwrap_or_else(|_| "/MenuBar".to_string());
 
-            // Try to get icon pixmap
-            let (icon_rgba, icon_size) = match proxy.icon_pixmap().await {
-                Ok(pixmaps) if !pixmaps.is_empty() => {
-                    // Pick the largest pixmap
-                    let best = pixmaps.iter().max_by_key(|(w, h, _)| w * h).unwrap();
-                    let (w, _h, data) = best;
-                    // SNI pixmaps are ARGB32 in network byte order, convert to RGBA
-                    let rgba = argb_to_rgba(data);
-                    (Some(rgba), *w as u32)
-                }
-                _ => (None, 0),
+            // Use cached icon if available, otherwise fetch
+            let cache_key = format!("{bus_name}:{id}");
+            let (icon_rgba, icon_size) = if let Some(cached) = icon_cache.get(&cache_key) {
+                cached.clone()
+            } else {
+                let result = match proxy.icon_pixmap().await {
+                    Ok(pixmaps) if !pixmaps.is_empty() => {
+                        let best = pixmaps.iter().max_by_key(|(w, h, _)| w * h).unwrap();
+                        let (w, _h, data) = best;
+                        let rgba = argb_to_rgba(data);
+                        (Some(rgba), *w as u32)
+                    }
+                    _ => (None, 0),
+                };
+                icon_cache.insert(cache_key.clone(), result.clone());
+                result
             };
 
+            alive_names.push(raw.clone());
             new_items.push(TrayItem {
                 id,
                 title,
@@ -255,9 +278,22 @@ async fn run_watcher(tray_state: TrayState) -> zbus::Result<()> {
             });
         }
 
-        // Prune items whose D-Bus service is gone
-        // (items that failed proxy creation were already skipped)
-        *tray_state.lock().unwrap() = new_items;
+        // Prune dead items from the watcher's internal list
+        {
+            let mut ws = watcher_inner.lock().unwrap();
+            ws.items.retain(|name| alive_names.contains(name));
+        }
+
+        // Remove stale entries from icon cache
+        icon_cache.retain(|k, _| new_items.iter().any(|item| {
+            format!("{}:{}", item.service, item.id) == *k
+        }));
+
+        // Update shared state (handle poisoned mutex gracefully)
+        match tray_state.lock() {
+            Ok(mut guard) => *guard = new_items,
+            Err(poisoned) => *poisoned.into_inner() = new_items,
+        }
     }
 }
 
