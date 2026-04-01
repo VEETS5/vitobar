@@ -94,6 +94,7 @@ const TASKBAR_HEIGHT: u32 = 22;
 
 struct PerOutput {
     output: wl_output::WlOutput,
+    output_name:    Option<String>,
 
     top_surface:    Option<LayerSurface>,
     top_pool:       Option<SlotPool>,
@@ -150,7 +151,7 @@ fn draw_top_on(
     config: &Config,
     niri_state: &EventStreamState,
     stats: &SysStats,
-    windows_ordered: &[niri_ipc::Window],
+    _windows_ordered: &[niri_ipc::Window],
     conn: &Connection,
     shm: &Shm,
 ) {
@@ -189,9 +190,15 @@ fn draw_top_on(
     let bh     = 18.0 * sf;
     let text_y = pad + bh * 0.75;
 
-    // ── Workspaces ──────────────────────────────────────────────────────
+    // ── Workspaces (filtered to this output) ────────────────────────────
+    let output_name = out.output_name.as_deref();
     let mut workspaces: Vec<&niri_ipc::Workspace> =
-        niri_state.workspaces.workspaces.values().collect();
+        niri_state.workspaces.workspaces.values()
+            .filter(|ws| match (output_name, ws.output.as_deref()) {
+                (Some(mine), Some(theirs)) => mine == theirs,
+                _ => true, // show all if output unknown
+            })
+            .collect();
     workspaces.sort_by_key(|w| w.idx);
 
     let bsz = 18.0 * sf;
@@ -297,16 +304,11 @@ fn draw_top_on(
 
     status_block!( 74.0, "\u{f1c0}", &format!(" {:.1}G",  stats.ram_gb),         &config.colors.base0d, "vitosettings");
 
-    // ── Active apps tray (unique running apps, to the left of status) ───
+    // ── Background apps tray (running processes without niri windows) ───
     rx -= gap;
-    let mut seen_apps: Vec<String> = Vec::new();
-    for win in windows_ordered {
-        let app_id = win.app_id.as_deref().unwrap_or("unknown");
-        if seen_apps.iter().any(|a| a == app_id) { continue; }
-        seen_apps.push(app_id.to_string());
-
+    for app_id in &stats.background_apps {
         let icon_block_w = 22.0 * sf;
-        if rx - icon_block_w < x + 40.0 * sf { break; } // don't overlap workspaces
+        if rx - icon_block_w < x + 40.0 * sf { break; }
         rx -= icon_block_w;
 
         r.draw_rect(rx, pad, icon_block_w, bh, &config.colors.base01);
@@ -322,15 +324,6 @@ fn draw_top_on(
             let gw = r.measure_text(glyph, fsz);
             r.draw_text(glyph, rx + (icon_block_w - gw) / 2.0, pad + bh * 0.82, fsz, &config.colors.base05);
         }
-
-        let first_win_id = windows_ordered.iter()
-            .find(|w| w.app_id.as_deref() == Some(app_id))
-            .map(|w| w.id)
-            .unwrap_or(0);
-        hits.push(HitRegion {
-            x: rx / sf, y: 2.0, w: icon_block_w / sf, h: 18.0,
-            action: BarAction::FocusWindow { id: first_win_id },
-        });
 
         rx -= gap;
     }
@@ -391,10 +384,22 @@ fn draw_bot_on(
     let text_y    = pad + bh * 0.75;
     let badge_fsz = (fsz - sf).max(8.0 * sf);
 
+    let output_name = out.output_name.as_deref();
     let ws_map: HashMap<u64, u8> = niri_state.workspaces.workspaces.values()
         .map(|w| (w.id, w.idx)).collect();
 
-    let mut windows: Vec<&niri_ipc::Window> = windows_ordered.iter().collect();
+    // Workspace IDs belonging to this output
+    let output_ws_ids: std::collections::HashSet<u64> = niri_state.workspaces.workspaces.values()
+        .filter(|ws| match (output_name, ws.output.as_deref()) {
+            (Some(mine), Some(theirs)) => mine == theirs,
+            _ => true,
+        })
+        .map(|ws| ws.id)
+        .collect();
+
+    let mut windows: Vec<&niri_ipc::Window> = windows_ordered.iter()
+        .filter(|w| w.workspace_id.map(|id| output_ws_ids.contains(&id)).unwrap_or(true))
+        .collect();
     windows.sort_by_key(|w| {
         w.workspace_id.and_then(|id| ws_map.get(&id)).copied().unwrap_or(255)
     });
@@ -558,7 +563,9 @@ impl OutputHandler for VitoBar {
     fn output_state(&mut self) -> &mut OutputState { &mut self.output_state }
 
     fn new_output(&mut self, _conn: &Connection, qh: &QueueHandle<Self>, output: wl_output::WlOutput) {
-        log::info!("new output detected, creating bar surfaces");
+        let output_name = self.output_state.info(&output)
+            .and_then(|info| info.name.clone());
+        log::info!("new output detected: {:?}, creating bar surfaces", output_name);
 
         // Top bar surface bound to this output
         let top_wl = self.compositor.create_surface(qh);
@@ -584,6 +591,7 @@ impl OutputHandler for VitoBar {
 
         self.outputs.push(PerOutput {
             output,
+            output_name,
             top_surface: Some(top),
             top_pool:    None,
             bot_surface: Some(bot),
@@ -926,7 +934,11 @@ fn main() {
         .insert_source(
             Timer::from_duration(Duration::from_secs(5)),
             |_, _, app: &mut VitoBar| {
+                let window_app_ids: Vec<String> = app.windows_ordered.iter()
+                    .filter_map(|w| w.app_id.clone())
+                    .collect();
                 app.stats = app.monitor.refresh();
+                app.stats.background_apps = app.monitor.detect_background_apps(&window_app_ids);
                 app.redraw_all_tops();
                 TimeoutAction::ToDuration(Duration::from_secs(5))
             },

@@ -1,4 +1,4 @@
-use sysinfo::{System};
+use sysinfo::{System, ProcessRefreshKind};
 use super::bluetooth::{BluetoothState, get_bluetooth};
 
 #[derive(Debug, Clone)]
@@ -9,6 +9,7 @@ pub struct SysStats {
     pub brightness_pct: u32,
     pub ram_gb:         f32,   // used RAM in GiB
     pub bluetooth:      BluetoothState,
+    pub background_apps: Vec<String>,
 }
 
 pub struct SysMonitor {
@@ -34,7 +35,46 @@ impl SysMonitor {
         let brightness_pct = get_brightness();
 
         let bluetooth = get_bluetooth();
-        SysStats { cpu_pct, battery_pct, volume_pct, brightness_pct, ram_gb, bluetooth }
+        SysStats { cpu_pct, battery_pct, volume_pct, brightness_pct, ram_gb, bluetooth, background_apps: Vec::new() }
+    }
+
+    /// Detect GUI apps running as processes but not present as niri windows.
+    pub fn detect_background_apps(&mut self, window_app_ids: &[String]) -> Vec<String> {
+        self.sys.refresh_processes_specifics(ProcessRefreshKind::new());
+
+        // Map process names to canonical app_ids for icon lookup
+        const KNOWN_APPS: &[(&[&str], &str)] = &[
+            (&["Discord", "discord", "vesktop", "Vesktop"], "discord"),
+            (&["steam", "Steam"], "steam"),
+            (&["spotify", "Spotify"], "spotify"),
+            (&["upc", "UbisoftConnect", "uplay"], "ubisoft"),
+            (&["telegram-desktop", "telegram", "Telegram"], "telegram"),
+            (&["slack", "Slack"], "slack"),
+            (&["obs", "OBS"], "obs"),
+            (&["signal-desktop", "Signal"], "signal"),
+            (&["thunderbird", "Thunderbird"], "thunderbird"),
+            (&["lutris", "Lutris"], "lutris"),
+            (&["heroic", "Heroic"], "heroic"),
+        ];
+
+        let mut found: Vec<String> = Vec::new();
+        for (proc_names, app_id) in KNOWN_APPS {
+            let running = self.sys.processes().values().any(|p| {
+                let name = p.name();
+                proc_names.iter().any(|pn| name.contains(pn))
+            });
+            if running {
+                // Only include if no niri window has this app_id
+                let has_window = window_app_ids.iter().any(|wid| {
+                    let wid_lower = wid.to_ascii_lowercase();
+                    wid_lower.contains(app_id)
+                });
+                if !has_window {
+                    found.push(app_id.to_string());
+                }
+            }
+        }
+        found
     }
 }
 
