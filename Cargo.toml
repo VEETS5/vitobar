@@ -15,6 +15,10 @@ path = "src/launcher/main.rs"
 name = "vitosettings"
 path = "src/settings/main.rs"
 
+[[bin]]
+name = "vitogreeter"
+path = "src/greeter/main.rs"
+
 [dependencies]
 # Wayland layer shell surface
 smithay-client-toolkit = { version = "0.19", features = ["calloop"] }
