@@ -72,6 +72,7 @@ struct SettingsApp {
     scroll_offset:   f32,
     hovered_widget:  Option<usize>,
     max_scroll:      f32,
+    draw_pending:    bool,
 }
 
 impl SettingsApp {
@@ -402,7 +403,7 @@ impl SettingsApp {
         }
 
         // ── Flush ──────────────────────────────────────────────────────────
-        let bgra = r.as_bgra();
+        let bgra = r.into_bgra();
         let len  = canvas.len().min(bgra.len());
         canvas[..len].copy_from_slice(&bgra[..len]);
 
@@ -595,7 +596,7 @@ impl PointerHandler for SettingsApp {
                 Motion { .. } => {
                     self.pointer_pos = event.position;
 
-                    // Slider drag
+                    // Slider drag - update value but defer redraw
                     if let Some(widget_idx) = self.drag_widget {
                         let lx = event.position.0 as f32;
                         let cx = SIDEBAR_W + CONTENT_PAD;
@@ -606,7 +607,7 @@ impl PointerHandler for SettingsApp {
                             let val = ((lx - track_x) / track_w).clamp(0.0, 1.0);
                             let result = apply_widget_action(&mut self.widgets[widget_idx], val);
                             self.handle_config_result(result);
-                            self.draw();
+                            self.draw_pending = true;
                         }
                         continue;
                     }
@@ -645,6 +646,11 @@ impl PointerHandler for SettingsApp {
                 }
                 _ => {}
             }
+        }
+        // Flush deferred draws (coalesces multiple motion events into one redraw)
+        if self.draw_pending {
+            self.draw_pending = false;
+            self.draw();
         }
     }
 }
@@ -726,6 +732,7 @@ fn main() {
         scroll_offset:   0.0,
         hovered_widget:  None,
         max_scroll:      0.0,
+        draw_pending:    false,
     };
 
     let mut event_loop: EventLoop<SettingsApp> = EventLoop::try_new().expect("event loop");

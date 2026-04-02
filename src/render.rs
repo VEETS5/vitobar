@@ -96,18 +96,15 @@ impl Renderer {
         );
     }
 
-    /// Returns raw BGRA bytes for Wayland shm buffer
-    pub fn as_bgra(&self) -> Vec<u8> {
-        let data = self.pixmap.data();
-        let mut bgra = Vec::with_capacity(data.len());
-        for chunk in data.chunks(4) {
-            // tiny-skia is RGBA, Wayland xrgb8888 wants BGRA
-            bgra.push(chunk[2]); // B
-            bgra.push(chunk[1]); // G
-            bgra.push(chunk[0]); // R
-            bgra.push(chunk[3]); // A
+    /// Swizzle RGBA to BGRA in-place and return a reference to the pixel data.
+    /// After calling this, the pixmap data is in BGRA format (Wayland xrgb8888).
+    /// The Renderer should not be used for further drawing after this call.
+    pub fn into_bgra(&mut self) -> &[u8] {
+        let data = self.pixmap.data_mut();
+        for chunk in data.chunks_exact_mut(4) {
+            chunk.swap(0, 2); // swap R and B
         }
-        bgra
+        self.pixmap.data()
     }
 
     /// `y` is the **baseline** in screen-space (Y increases downward).

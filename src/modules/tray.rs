@@ -5,6 +5,7 @@
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
+use std::sync::atomic::{AtomicBool, Ordering};
 
 // ── Public types shared with the main bar ────────────────────────────────────
 
@@ -30,18 +31,24 @@ pub struct MenuItem {
 
 pub type TrayState = Arc<Mutex<Vec<TrayItem>>>;
 
+/// Shared dirty flag: set by tray thread when items change, cleared by draw code.
+pub type TrayDirty = Arc<AtomicBool>;
+
 // ── Background thread entry point ────────────────────────────────────────────
 
 /// Spawns a background thread that runs the SNI watcher and keeps `state`
 /// up to date. Call once at startup. The returned `TrayState` is polled by
-/// the bar's drawing code.
-pub fn spawn_tray_watcher() -> TrayState {
+/// the bar's drawing code. The `TrayDirty` flag is set when items change.
+pub fn spawn_tray_watcher() -> (TrayState, TrayDirty) {
     let state: TrayState = Arc::new(Mutex::new(Vec::new()));
+    let dirty: TrayDirty = Arc::new(AtomicBool::new(true));
     let state2 = Arc::clone(&state);
+    let dirty2 = Arc::clone(&dirty);
 
     std::thread::spawn(move || {
         loop {
             let state3 = Arc::clone(&state2);
+            let dirty3 = Arc::clone(&dirty2);
             let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                 let rt = tokio::runtime::Builder::new_current_thread()
                     .enable_all()
@@ -49,7 +56,7 @@ pub fn spawn_tray_watcher() -> TrayState {
                     .expect("tokio runtime for tray");
 
                 rt.block_on(async move {
-                    if let Err(e) = run_watcher(state3).await {
+                    if let Err(e) = run_watcher(state3, dirty3).await {
                         log::error!("tray watcher failed: {e}");
                     }
                 });
@@ -64,7 +71,7 @@ pub fn spawn_tray_watcher() -> TrayState {
         }
     });
 
-    state
+    (state, dirty)
 }
 
 // ── SNI Watcher implementation ───────────────────────────────────────────────
@@ -177,7 +184,7 @@ trait StatusNotifierItem {
 
 // ── Main watcher loop ────────────────────────────────────────────────────────
 
-async fn run_watcher(tray_state: TrayState) -> zbus::Result<()> {
+async fn run_watcher(tray_state: TrayState, tray_dirty: TrayDirty) -> zbus::Result<()> {
     let conn = Connection::session().await?;
 
     let watcher_inner = Arc::new(Mutex::new(WatcherState {
@@ -296,6 +303,7 @@ async fn run_watcher(tray_state: TrayState) -> zbus::Result<()> {
             Ok(mut guard) => *guard = new_items,
             Err(poisoned) => *poisoned.into_inner() = new_items,
         }
+        tray_dirty.store(true, Ordering::Release);
     }
 }
 

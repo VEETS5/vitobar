@@ -294,7 +294,7 @@ impl LauncherApp {
         }
 
         // ── Flush ─────────────────────────────────────────────────────────────
-        let bgra = r.as_bgra();
+        let bgra = r.into_bgra();
         let len = canvas.len().min(bgra.len());
         canvas[..len].copy_from_slice(&bgra[..len]);
 
