@@ -10,8 +10,7 @@ use modules::{
     bluetooth::BluetoothStatus,
     tray::{self, TrayState, TrayDirty, TrayItem},
 };
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
+use std::sync::atomic::Ordering;
 use render::Renderer;
 
 use niri_ipc::{
@@ -235,7 +234,6 @@ struct VitoBar {
 
     running:        bool,
     bars_hidden:    bool,
-    toggle_signal:  Arc<AtomicBool>,
 
     niri_state:      EventStreamState,
     windows_ordered: Vec<niri_ipc::Window>,
@@ -1518,7 +1516,6 @@ fn main() {
         stats:       initial_stats,
         running:     true,
         bars_hidden: false,
-        toggle_signal: Arc::new(AtomicBool::new(false)),
         niri_state,
         windows_ordered,
         seat_state,
@@ -1698,22 +1695,28 @@ fn main() {
         )
         .expect("background apps timer");
 
-    // ── SIGUSR1 toggle: hide/show bars (for OLED burn-in prevention) ──
-    let toggle_flag = app.toggle_signal.clone();
-    signal_hook::flag::register(signal_hook::consts::SIGUSR1, toggle_flag)
-        .expect("SIGUSR1 handler");
-
+    // ── IPC socket: toggle bars via /tmp/vitobar.sock ──
+    let sock_path = "/tmp/vitobar.sock";
+    let _ = std::fs::remove_file(sock_path);
+    let listener = std::os::unix::net::UnixListener::bind(sock_path).expect("bind vitobar.sock");
+    listener.set_nonblocking(true).expect("nonblocking");
     event_loop.handle()
         .insert_source(
-            Timer::from_duration(Duration::from_millis(100)),
-            |_, _, app: &mut VitoBar| {
-                if app.toggle_signal.swap(false, Ordering::Relaxed) {
+            calloop::generic::Generic::new(
+                unsafe { std::os::fd::BorrowedFd::borrow_raw(std::os::fd::AsRawFd::as_raw_fd(&listener)) },
+                calloop::Interest::READ,
+                calloop::Mode::Level,
+            ),
+            move |_, _, app: &mut VitoBar| {
+                while let Ok((mut stream, _)) = listener.accept() {
+                    let mut buf = [0u8; 64];
+                    let _ = std::io::Read::read(&mut stream, &mut buf);
                     app.toggle_bars();
                 }
-                TimeoutAction::ToDuration(Duration::from_millis(100))
+                Ok(calloop::PostAction::Continue)
             },
         )
-        .expect("toggle timer");
+        .expect("toggle socket");
 
     while app.running {
         event_loop.dispatch(None, &mut app).expect("dispatch failed");
