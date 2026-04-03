@@ -403,8 +403,16 @@ fn draw_top_on(
     if let Some(bat) = stats.battery_pct {
         status_block!(68.0, "\u{f240}", &format!(" {:>3.0}%", bat),              &config.colors.base0b, "vitosettings");
     }
-    status_block!( 68.0, "\u{f185}", &format!(" {:>3}%",  stats.brightness_pct), &config.colors.base0a, "vitosettings");
+    if let Some(brt) = stats.brightness_pct {
+        status_block!(68.0, "\u{f0eb}", &format!(" {:>3}%", brt),                &config.colors.base0a, "vitosettings");
+    }
     status_block!( 68.0, "\u{f0e7}", &format!(" {:>3.0}%", stats.cpu_pct),       &config.colors.base09, "vitosettings");
+    if let Some(ct) = stats.cpu_temp {
+        status_block!(68.0, "\u{f2c9}", &format!(" {:>2.0}°C", ct),              &config.colors.base09, "vitosettings");
+    }
+    if let Some(gt) = stats.gpu_temp {
+        status_block!(68.0, "\u{f26c}", &format!(" {:>2.0}°C", gt),              &config.colors.base08, "vitosettings");
+    }
 
     let (bt_icon, bt_text, bt_col) = match &stats.bluetooth.status {
         BluetoothStatus::Off        => ("\u{f294}", " off".to_string(), config.colors.base03.clone()),
