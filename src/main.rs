@@ -691,31 +691,36 @@ impl VitoBar {
 
     fn toggle_bars(&mut self) {
         self.bars_hidden = !self.bars_hidden;
-        for out in &self.outputs {
-            if let Some(top) = &out.top_surface {
-                if self.bars_hidden {
-                    top.set_size(0, 0);
+        if self.bars_hidden {
+            for out in &mut self.outputs {
+                if let Some(top) = &out.top_surface {
                     top.set_exclusive_zone(0);
-                } else {
+                    top.set_size(0, 1);
+                    top.wl_surface().attach(None, 0, 0);
+                    top.wl_surface().commit();
+                }
+                if let Some(bot) = &out.bot_surface {
+                    bot.set_exclusive_zone(0);
+                    bot.set_size(0, 1);
+                    bot.wl_surface().attach(None, 0, 0);
+                    bot.wl_surface().commit();
+                }
+            }
+        } else {
+            for out in &mut self.outputs {
+                if let Some(top) = &out.top_surface {
                     top.set_size(0, BAR_HEIGHT);
                     top.set_exclusive_zone(BAR_HEIGHT as i32);
+                    top.commit();
                 }
-                top.commit();
-            }
-            if let Some(bot) = &out.bot_surface {
-                if self.bars_hidden {
-                    bot.set_size(0, 0);
-                    bot.set_exclusive_zone(0);
-                } else {
+                if let Some(bot) = &out.bot_surface {
                     bot.set_size(0, TASKBAR_HEIGHT);
                     bot.set_exclusive_zone(TASKBAR_HEIGHT as i32);
+                    bot.commit();
                 }
-                bot.commit();
+                out.top_configured = false;
+                out.bot_configured = false;
             }
-        }
-        if !self.bars_hidden {
-            self.redraw_all_tops();
-            self.redraw_all_bots();
         }
     }
 
