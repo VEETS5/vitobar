@@ -202,10 +202,8 @@ struct PerOutput {
 
     top_surface:    Option<LayerSurface>,
     top_pool:       Option<SlotPool>,
-    top_stashed:    Option<LayerSurface>,
     bot_surface:    Option<LayerSurface>,
     bot_pool:       Option<SlotPool>,
-    bot_stashed:    Option<LayerSurface>,
 
     width:          u32,
     scale:          u32,
@@ -691,39 +689,50 @@ impl VitoBar {
 
     fn toggle_bars(&mut self) {
         self.bars_hidden = !self.bars_hidden;
-        log::info!("toggle_bars: bars_hidden={}", self.bars_hidden);
+        log::info!("toggle_bars: hidden={}", self.bars_hidden);
         if self.bars_hidden {
-            // Unmap surfaces by setting exclusive zone to -1 and attaching null buffer
             for out in &mut self.outputs {
+                // Destroy top surface
                 if let Some(top) = out.top_surface.take() {
-                    top.set_exclusive_zone(0);
-                    top.wl_surface().attach(None, 0, 0);
-                    top.wl_surface().commit();
-                    out.top_stashed = Some(top);
+                    let wl = top.wl_surface().clone();
+                    drop(top);
+                    wl.destroy();
                 }
+                // Destroy bot surface
                 if let Some(bot) = out.bot_surface.take() {
-                    bot.set_exclusive_zone(0);
-                    bot.wl_surface().attach(None, 0, 0);
-                    bot.wl_surface().commit();
-                    out.bot_stashed = Some(bot);
+                    let wl = bot.wl_surface().clone();
+                    drop(bot);
+                    wl.destroy();
                 }
+                out.top_pool = None;
+                out.bot_pool = None;
                 out.top_configured = false;
                 out.bot_configured = false;
             }
         } else {
+            // Recreate surfaces for each output
             for out in &mut self.outputs {
-                if let Some(top) = out.top_stashed.take() {
-                    top.set_size(0, BAR_HEIGHT);
-                    top.set_exclusive_zone(BAR_HEIGHT as i32);
-                    top.commit();
-                    out.top_surface = Some(top);
-                }
-                if let Some(bot) = out.bot_stashed.take() {
-                    bot.set_size(0, TASKBAR_HEIGHT);
-                    bot.set_exclusive_zone(TASKBAR_HEIGHT as i32);
-                    bot.commit();
-                    out.bot_surface = Some(bot);
-                }
+                let top_wl = self.compositor.create_surface(&self.qh);
+                let top = self.layer_shell.create_layer_surface(
+                    &self.qh, top_wl, Layer::Top, Some("vitobar-top"), Some(&out.output),
+                );
+                top.set_anchor(Anchor::TOP | Anchor::LEFT | Anchor::RIGHT);
+                top.set_size(0, BAR_HEIGHT);
+                top.set_exclusive_zone(BAR_HEIGHT as i32);
+                top.set_keyboard_interactivity(KeyboardInteractivity::None);
+                top.commit();
+                out.top_surface = Some(top);
+
+                let bot_wl = self.compositor.create_surface(&self.qh);
+                let bot = self.layer_shell.create_layer_surface(
+                    &self.qh, bot_wl, Layer::Top, Some("vitobar-bot"), Some(&out.output),
+                );
+                bot.set_anchor(Anchor::BOTTOM | Anchor::LEFT | Anchor::RIGHT);
+                bot.set_size(0, TASKBAR_HEIGHT);
+                bot.set_exclusive_zone(TASKBAR_HEIGHT as i32);
+                bot.set_keyboard_interactivity(KeyboardInteractivity::None);
+                bot.commit();
+                out.bot_surface = Some(bot);
             }
         }
     }
@@ -1075,10 +1084,8 @@ impl OutputHandler for VitoBar {
             output_name,
             top_surface: Some(top),
             top_pool:    None,
-            top_stashed: None,
             bot_surface: Some(bot),
             bot_pool:    None,
-            bot_stashed: None,
             width:       1920,
             scale:       1,
             top_configured: false,
@@ -1707,24 +1714,21 @@ fn main() {
     let sock_path = "/tmp/vitobar.sock";
     let _ = std::fs::remove_file(sock_path);
     let listener = std::os::unix::net::UnixListener::bind(sock_path).expect("bind vitobar.sock");
-    listener.set_nonblocking(true).expect("nonblocking");
+    let (toggle_tx, toggle_rx) = calloop_channel::<()>();
+    std::thread::spawn(move || {
+        for stream in listener.incoming() {
+            if stream.is_ok() {
+                if toggle_tx.send(()).is_err() { break; }
+            }
+        }
+    });
     event_loop.handle()
-        .insert_source(
-            calloop::generic::Generic::new(
-                unsafe { std::os::fd::BorrowedFd::borrow_raw(std::os::fd::AsRawFd::as_raw_fd(&listener)) },
-                calloop::Interest::READ,
-                calloop::Mode::Level,
-            ),
-            move |_, _, app: &mut VitoBar| {
-                while let Ok((mut stream, _)) = listener.accept() {
-                    let mut buf = [0u8; 64];
-                    let _ = std::io::Read::read(&mut stream, &mut buf);
-                    app.toggle_bars();
-                }
-                Ok(calloop::PostAction::Continue)
-            },
-        )
-        .expect("toggle socket");
+        .insert_source(toggle_rx, |ev, _, app: &mut VitoBar| {
+            if let ChannelEvent::Msg(()) = ev {
+                app.toggle_bars();
+            }
+        })
+        .expect("toggle channel");
 
     while app.running {
         event_loop.dispatch(None, &mut app).expect("dispatch failed");
