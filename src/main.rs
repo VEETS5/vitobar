@@ -202,8 +202,10 @@ struct PerOutput {
 
     top_surface:    Option<LayerSurface>,
     top_pool:       Option<SlotPool>,
+    top_stashed:    Option<LayerSurface>,
     bot_surface:    Option<LayerSurface>,
     bot_pool:       Option<SlotPool>,
+    bot_stashed:    Option<LayerSurface>,
 
     width:          u32,
     scale:          u32,
@@ -689,35 +691,39 @@ impl VitoBar {
 
     fn toggle_bars(&mut self) {
         self.bars_hidden = !self.bars_hidden;
+        log::info!("toggle_bars: bars_hidden={}", self.bars_hidden);
         if self.bars_hidden {
+            // Unmap surfaces by setting exclusive zone to -1 and attaching null buffer
             for out in &mut self.outputs {
-                if let Some(top) = &out.top_surface {
+                if let Some(top) = out.top_surface.take() {
                     top.set_exclusive_zone(0);
-                    top.set_size(0, 1);
                     top.wl_surface().attach(None, 0, 0);
                     top.wl_surface().commit();
+                    out.top_stashed = Some(top);
                 }
-                if let Some(bot) = &out.bot_surface {
+                if let Some(bot) = out.bot_surface.take() {
                     bot.set_exclusive_zone(0);
-                    bot.set_size(0, 1);
                     bot.wl_surface().attach(None, 0, 0);
                     bot.wl_surface().commit();
-                }
-            }
-        } else {
-            for out in &mut self.outputs {
-                if let Some(top) = &out.top_surface {
-                    top.set_size(0, BAR_HEIGHT);
-                    top.set_exclusive_zone(BAR_HEIGHT as i32);
-                    top.commit();
-                }
-                if let Some(bot) = &out.bot_surface {
-                    bot.set_size(0, TASKBAR_HEIGHT);
-                    bot.set_exclusive_zone(TASKBAR_HEIGHT as i32);
-                    bot.commit();
+                    out.bot_stashed = Some(bot);
                 }
                 out.top_configured = false;
                 out.bot_configured = false;
+            }
+        } else {
+            for out in &mut self.outputs {
+                if let Some(top) = out.top_stashed.take() {
+                    top.set_size(0, BAR_HEIGHT);
+                    top.set_exclusive_zone(BAR_HEIGHT as i32);
+                    top.commit();
+                    out.top_surface = Some(top);
+                }
+                if let Some(bot) = out.bot_stashed.take() {
+                    bot.set_size(0, TASKBAR_HEIGHT);
+                    bot.set_exclusive_zone(TASKBAR_HEIGHT as i32);
+                    bot.commit();
+                    out.bot_surface = Some(bot);
+                }
             }
         }
     }
@@ -1069,8 +1075,10 @@ impl OutputHandler for VitoBar {
             output_name,
             top_surface: Some(top),
             top_pool:    None,
+            top_stashed: None,
             bot_surface: Some(bot),
             bot_pool:    None,
+            bot_stashed: None,
             width:       1920,
             scale:       1,
             top_configured: false,
