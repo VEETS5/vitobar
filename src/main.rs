@@ -233,7 +233,6 @@ struct VitoBar {
     stats:          SysStats,
 
     running:        bool,
-    bars_hidden:    bool,
 
     niri_state:      EventStreamState,
     windows_ordered: Vec<niri_ipc::Window>,
@@ -683,56 +682,6 @@ impl VitoBar {
         for out in outputs.iter_mut() {
             if out.bot_configured {
                 draw_bot_on(out, config, niri_state, windows_ordered, conn, shm);
-            }
-        }
-    }
-
-    fn toggle_bars(&mut self) {
-        self.bars_hidden = !self.bars_hidden;
-        log::info!("toggle_bars: hidden={}", self.bars_hidden);
-        if self.bars_hidden {
-            for out in &mut self.outputs {
-                // Destroy top surface
-                if let Some(top) = out.top_surface.take() {
-                    let wl = top.wl_surface().clone();
-                    drop(top);
-                    wl.destroy();
-                }
-                // Destroy bot surface
-                if let Some(bot) = out.bot_surface.take() {
-                    let wl = bot.wl_surface().clone();
-                    drop(bot);
-                    wl.destroy();
-                }
-                out.top_pool = None;
-                out.bot_pool = None;
-                out.top_configured = false;
-                out.bot_configured = false;
-            }
-        } else {
-            // Recreate surfaces for each output
-            for out in &mut self.outputs {
-                let top_wl = self.compositor.create_surface(&self.qh);
-                let top = self.layer_shell.create_layer_surface(
-                    &self.qh, top_wl, Layer::Top, Some("vitobar-top"), Some(&out.output),
-                );
-                top.set_anchor(Anchor::TOP | Anchor::LEFT | Anchor::RIGHT);
-                top.set_size(0, BAR_HEIGHT);
-                top.set_exclusive_zone(BAR_HEIGHT as i32);
-                top.set_keyboard_interactivity(KeyboardInteractivity::None);
-                top.commit();
-                out.top_surface = Some(top);
-
-                let bot_wl = self.compositor.create_surface(&self.qh);
-                let bot = self.layer_shell.create_layer_surface(
-                    &self.qh, bot_wl, Layer::Top, Some("vitobar-bot"), Some(&out.output),
-                );
-                bot.set_anchor(Anchor::BOTTOM | Anchor::LEFT | Anchor::RIGHT);
-                bot.set_size(0, TASKBAR_HEIGHT);
-                bot.set_exclusive_zone(TASKBAR_HEIGHT as i32);
-                bot.set_keyboard_interactivity(KeyboardInteractivity::None);
-                bot.commit();
-                out.bot_surface = Some(bot);
             }
         }
     }
@@ -1530,7 +1479,6 @@ fn main() {
         monitor,
         stats:       initial_stats,
         running:     true,
-        bars_hidden: false,
         niri_state,
         windows_ordered,
         seat_state,
@@ -1709,26 +1657,6 @@ fn main() {
             },
         )
         .expect("background apps timer");
-
-    // ── IPC socket: toggle bars via /tmp/vitobar.sock ──
-    let sock_path = "/tmp/vitobar.sock";
-    let _ = std::fs::remove_file(sock_path);
-    let listener = std::os::unix::net::UnixListener::bind(sock_path).expect("bind vitobar.sock");
-    let (toggle_tx, toggle_rx) = calloop_channel::<()>();
-    std::thread::spawn(move || {
-        for stream in listener.incoming() {
-            if stream.is_ok() {
-                if toggle_tx.send(()).is_err() { break; }
-            }
-        }
-    });
-    event_loop.handle()
-        .insert_source(toggle_rx, |ev, _, app: &mut VitoBar| {
-            if let ChannelEvent::Msg(()) = ev {
-                app.toggle_bars();
-            }
-        })
-        .expect("toggle channel");
 
     while app.running {
         event_loop.dispatch(None, &mut app).expect("dispatch failed");
