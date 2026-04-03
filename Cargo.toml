@@ -47,6 +47,9 @@ toml         = "0.8"
 calloop                = "0.13"
 calloop-wayland-source = "0.3"
 
+# Signal handling (toggle bar visibility)
+signal-hook = "0.3"
+
 # Logging
 log         = "0.4"
 env_logger  = "0.11"

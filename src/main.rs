@@ -10,7 +10,8 @@ use modules::{
     bluetooth::BluetoothStatus,
     tray::{self, TrayState, TrayDirty, TrayItem},
 };
-use std::sync::atomic::Ordering;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 use render::Renderer;
 
 use niri_ipc::{
@@ -233,6 +234,8 @@ struct VitoBar {
     stats:          SysStats,
 
     running:        bool,
+    bars_hidden:    bool,
+    toggle_signal:  Arc<AtomicBool>,
 
     niri_state:      EventStreamState,
     windows_ordered: Vec<niri_ipc::Window>,
@@ -683,6 +686,36 @@ impl VitoBar {
             if out.bot_configured {
                 draw_bot_on(out, config, niri_state, windows_ordered, conn, shm);
             }
+        }
+    }
+
+    fn toggle_bars(&mut self) {
+        self.bars_hidden = !self.bars_hidden;
+        for out in &self.outputs {
+            if let Some(top) = &out.top_surface {
+                if self.bars_hidden {
+                    top.set_size(0, 0);
+                    top.set_exclusive_zone(0);
+                } else {
+                    top.set_size(0, BAR_HEIGHT);
+                    top.set_exclusive_zone(BAR_HEIGHT as i32);
+                }
+                top.commit();
+            }
+            if let Some(bot) = &out.bot_surface {
+                if self.bars_hidden {
+                    bot.set_size(0, 0);
+                    bot.set_exclusive_zone(0);
+                } else {
+                    bot.set_size(0, TASKBAR_HEIGHT);
+                    bot.set_exclusive_zone(TASKBAR_HEIGHT as i32);
+                }
+                bot.commit();
+            }
+        }
+        if !self.bars_hidden {
+            self.redraw_all_tops();
+            self.redraw_all_bots();
         }
     }
 
@@ -1479,6 +1512,8 @@ fn main() {
         monitor,
         stats:       initial_stats,
         running:     true,
+        bars_hidden: false,
+        toggle_signal: Arc::new(AtomicBool::new(false)),
         niri_state,
         windows_ordered,
         seat_state,
@@ -1657,6 +1692,23 @@ fn main() {
             },
         )
         .expect("background apps timer");
+
+    // ── SIGUSR1 toggle: hide/show bars (for OLED burn-in prevention) ──
+    let toggle_flag = app.toggle_signal.clone();
+    signal_hook::flag::register(signal_hook::consts::SIGUSR1, toggle_flag)
+        .expect("SIGUSR1 handler");
+
+    event_loop.handle()
+        .insert_source(
+            Timer::from_duration(Duration::from_millis(100)),
+            |_, _, app: &mut VitoBar| {
+                if app.toggle_signal.swap(false, Ordering::Relaxed) {
+                    app.toggle_bars();
+                }
+                TimeoutAction::ToDuration(Duration::from_millis(100))
+            },
+        )
+        .expect("toggle timer");
 
     while app.running {
         event_loop.dispatch(None, &mut app).expect("dispatch failed");
