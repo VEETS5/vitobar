@@ -117,13 +117,14 @@ fn get_brightness() -> Option<u32> {
 fn get_temps(components: &Components) -> (Option<f32>, Option<f32>) {
     let mut cpu_temp: Option<f32> = None;
     let mut gpu_temp: Option<f32> = None;
+    let mut gpu_fallback: Option<f32> = None;
 
     for c in components.iter() {
         let label = c.label().to_ascii_lowercase();
         let temp = c.temperature();
         if temp <= 0.0 { continue; }
 
-        // CPU: look for coretemp/k10temp/Tctl/Package id/Tdie
+        // CPU: prefer Tctl/Package id, then Tdie/coretemp/k10temp
         if cpu_temp.is_none() {
             if label.contains("package id")
                 || label.contains("tctl")
@@ -136,19 +137,24 @@ fn get_temps(components: &Components) -> (Option<f32>, Option<f32>) {
             }
         }
 
-        // GPU: look for amdgpu/nvidia/intel igpu (i915/xe)/edge/junction
-        if gpu_temp.is_none() {
-            if label.contains("amdgpu")
-                || label.contains("nvidia")
-                || label.contains("i915")
-                || label.contains("xe")
-                || label.contains("edge")
-                || label.contains("junction")
-                || label.contains("gpu")
-            {
+        // GPU: prefer "edge" (die temp), fall back to junction/mem/generic
+        let is_gpu = label.contains("amdgpu")
+            || label.contains("nvidia")
+            || label.contains("i915")
+            || (label.contains(" xe ") || label.starts_with("xe ") || label.ends_with(" xe"))
+            || label.contains("gpu");
+
+        if is_gpu {
+            if label.contains("edge") {
                 gpu_temp = Some(temp);
+            } else if gpu_fallback.is_none() && !label.contains("mem") {
+                gpu_fallback = Some(temp);
             }
         }
+    }
+
+    if gpu_temp.is_none() {
+        gpu_temp = gpu_fallback;
     }
 
     // Fallback for nvidia: nvidia-smi
