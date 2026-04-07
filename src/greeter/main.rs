@@ -83,17 +83,33 @@ fn greetd_login(username: &str, password: &str, cmd: &[&str]) -> Result<(), Stri
             match resp2["type"].as_str().unwrap_or("") {
                 "success" => {}
                 "error" => {
+                    let _ = greetd_send(&mut stream, &serde_json::json!({
+                        "type": "cancel_session"
+                    }));
                     return Err(resp2["description"].as_str()
                         .unwrap_or("Authentication failed").into());
                 }
-                other => return Err(format!("Unexpected response: {}", other)),
+                other => {
+                    let _ = greetd_send(&mut stream, &serde_json::json!({
+                        "type": "cancel_session"
+                    }));
+                    return Err(format!("Unexpected response: {}", other));
+                }
             }
         }
         "error" => {
+            let _ = greetd_send(&mut stream, &serde_json::json!({
+                "type": "cancel_session"
+            }));
             return Err(resp["description"].as_str()
                 .unwrap_or("Session creation failed").into());
         }
-        other => return Err(format!("Unexpected response: {}", other)),
+        other => {
+            let _ = greetd_send(&mut stream, &serde_json::json!({
+                "type": "cancel_session"
+            }));
+            return Err(format!("Unexpected response: {}", other));
+        }
     }
 
     // Start session

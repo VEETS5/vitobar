@@ -461,6 +461,10 @@ pub fn build_widgets(cat: Category, config: &crate::config::Config) -> Vec<Widge
                     cmd:   "systemctl suspend".into(),
                 },
                 Widget::Button {
+                    label: "\u{f7c9}  Hibernate".into(),
+                    cmd:   "systemctl hibernate".into(),
+                },
+                Widget::Button {
                     label: "\u{f021}  Reboot".into(),
                     cmd:   "systemctl reboot".into(),
                 },
