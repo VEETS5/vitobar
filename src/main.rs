@@ -163,8 +163,6 @@ use calloop::{EventLoop, channel::{channel as calloop_channel, Event as ChannelE
 use calloop_wayland_source::WaylandSource;
 use std::time::Duration;
 
-const BAR_HEIGHT:     u32 = 22;
-const TASKBAR_HEIGHT: u32 = 22;
 const POPUP_WIDTH:    u32 = 160;
 const POPUP_ITEM_H:   u32 = 22;
 const POPUP_ITEMS:    u32 = 9; // Close, Maximize, Fullscreen, Float, WS 1-5
@@ -270,7 +268,7 @@ fn draw_top_on(
     tray_items: &[TrayItem],
 ) {
     let width  = out.width;
-    let height = BAR_HEIGHT;
+    let height = config.bar_h();
     let scale  = out.scale;
     let pw = width  * scale;
     let ph = height * scale;
@@ -295,7 +293,7 @@ fn draw_top_on(
         .expect("failed to create buffer");
 
     let mut r = Renderer::new(pw, ph);
-    r.clear(&config.colors.base00);
+    r.clear_rgba(&config.colors.base00, config.opacity());
 
     let mut hits: Vec<HitRegion> = Vec::new();
 
@@ -511,7 +509,7 @@ fn draw_bot_on(
     shm: &Shm,
 ) {
     let width  = out.width;
-    let height = TASKBAR_HEIGHT;
+    let height = config.taskbar_h();
     let scale  = out.scale;
     let pw = width  * scale;
     let ph = height * scale;
@@ -536,7 +534,7 @@ fn draw_bot_on(
         .expect("failed to create buffer");
 
     let mut r = Renderer::new(pw, ph);
-    r.clear(&config.colors.base00);
+    r.clear_rgba(&config.colors.base00, config.opacity());
 
     // ── Visual borders ──────────────────────────────────────────────────
     r.draw_rect_outline(0.0, 0.0, pw as f32, ph as f32, &config.colors.base02, sf);
@@ -802,9 +800,9 @@ impl VitoBar {
         let menu_ph_u = menu_ph.ceil() as u32;
         let menu_x_phys = (popup.menu_x * sf).min(ow as f32 - menu_pw as f32).max(0.0);
         let menu_y_phys = if popup.anchor_top {
-            BAR_HEIGHT as f32 * sf
+            config.bar_h() as f32 * sf
         } else {
-            oh as f32 - TASKBAR_HEIGHT as f32 * sf - menu_ph
+            oh as f32 - config.taskbar_h() as f32 * sf - menu_ph
         }.max(0.0);
 
         // Logical coords for hit regions
@@ -1012,8 +1010,8 @@ impl OutputHandler for VitoBar {
             qh, top_wl, Layer::Top, Some("vitobar-top"), Some(&output),
         );
         top.set_anchor(Anchor::TOP | Anchor::LEFT | Anchor::RIGHT);
-        top.set_size(0, BAR_HEIGHT);
-        top.set_exclusive_zone(BAR_HEIGHT as i32);
+        top.set_size(0, self.config.bar_h());
+        top.set_exclusive_zone(self.config.bar_h() as i32);
         top.set_keyboard_interactivity(KeyboardInteractivity::None);
         top.commit();
 
@@ -1023,8 +1021,8 @@ impl OutputHandler for VitoBar {
             qh, bot_wl, Layer::Top, Some("vitobar-bot"), Some(&output),
         );
         bot.set_anchor(Anchor::BOTTOM | Anchor::LEFT | Anchor::RIGHT);
-        bot.set_size(0, TASKBAR_HEIGHT);
-        bot.set_exclusive_zone(TASKBAR_HEIGHT as i32);
+        bot.set_size(0, self.config.taskbar_h());
+        bot.set_exclusive_zone(self.config.taskbar_h() as i32);
         bot.set_keyboard_interactivity(KeyboardInteractivity::None);
         bot.commit();
 
@@ -1165,9 +1163,9 @@ impl PointerHandler for VitoBar {
                             let menu_h = (POPUP_ITEM_H * popup.num_items) as f32;
                             let mx = popup.menu_x;
                             let my = if popup.anchor_top {
-                                BAR_HEIGHT as f32
+                                self.config.bar_h() as f32
                             } else {
-                                popup.height as f32 - TASKBAR_HEIGHT as f32 - menu_h
+                                popup.height as f32 - self.config.taskbar_h() as f32 - menu_h
                             };
                             let new_idx = if px >= mx && px < mx + menu_w && py >= my && py < my + menu_h {
                                 Some(((py - my) / POPUP_ITEM_H as f32) as usize)
@@ -1188,9 +1186,9 @@ impl PointerHandler for VitoBar {
                             let menu_h = (POPUP_ITEM_H * popup.num_items) as f32;
                             let mx = popup.menu_x;
                             let my = if popup.anchor_top {
-                                BAR_HEIGHT as f32
+                                self.config.bar_h() as f32
                             } else {
-                                popup.height as f32 - TASKBAR_HEIGHT as f32 - menu_h
+                                popup.height as f32 - self.config.taskbar_h() as f32 - menu_h
                             };
                             if lx >= mx && lx < mx + menu_w && ly >= my && ly < my + menu_h {
                                 let hits = popup.hits.clone();
