@@ -157,6 +157,13 @@ impl SettingsApp {
             }
             WidgetResult::ConfigUpdateStr { key, value } => {
                 match key {
+                    "selected_theme" if value.is_empty() => {
+                        // "Stylix" option: clear the override so vitobar follows Stylix.
+                        self.config.selected_theme = None;
+                        config::remove_setting("selected_theme");
+                        self.config.colors = config::stylix_colors()
+                            .unwrap_or_else(|| Config::default().colors);
+                    }
                     "selected_theme" => {
                         self.config.selected_theme = Some(value.clone());
                         save_setting("selected_theme", toml::Value::String(value.clone()));

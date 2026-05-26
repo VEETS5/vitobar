@@ -124,6 +124,11 @@ pub fn available_themes() -> Vec<Theme> {
     themes
 }
 
+/// Current Stylix palette, if ~/.config/stylix/palette.json exists.
+pub fn stylix_colors() -> Option<Colors> {
+    load_stylix_colors()
+}
+
 fn load_stylix_colors() -> Option<Colors> {
     let home = std::env::var("HOME").unwrap_or_else(|_| "/root".into());
     let path = PathBuf::from(home).join(".config/stylix/palette.json");
@@ -272,6 +277,25 @@ pub fn save_setting(key: &str, value: toml::Value) {
 
     if let Some(parent) = path.parent() {
         let _ = fs::create_dir_all(parent);
+    }
+    if let Ok(s) = toml::to_string_pretty(&val) {
+        let _ = fs::write(path, s);
+    }
+}
+
+/// Remove a key from config.toml (no-op if absent). Used to clear an override
+/// such as `selected_theme` so vitobar falls back to Stylix.
+pub fn remove_setting(key: &str) {
+    let path = config_path();
+    if !path.exists() {
+        return;
+    }
+    let mut val: toml::Value = match fs::read_to_string(&path).ok().and_then(|s| toml::from_str(&s).ok()) {
+        Some(v) => v,
+        None => return,
+    };
+    if let Some(table) = val.as_table_mut() {
+        table.remove(key);
     }
     if let Ok(s) = toml::to_string_pretty(&val) {
         let _ = fs::write(path, s);
