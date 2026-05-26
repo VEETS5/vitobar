@@ -43,12 +43,23 @@ pub struct Config {
     pub font_path:      Option<String>,
     pub selected_theme: Option<String>,
     pub bar_opacity:    Option<f32>,
+    pub nightlight_mode:  Option<String>,
+    pub nightlight_temp:  Option<u32>,
+    pub nightlight_start: Option<u32>,
+    pub nightlight_end:   Option<u32>,
+    pub latitude:         Option<f32>,
+    pub longitude:        Option<f32>,
 }
 
 impl Config {
     pub fn bar_h(&self)     -> u32 { self.bar_height.unwrap_or(21) }
     pub fn taskbar_h(&self) -> u32 { self.taskbar_height.unwrap_or(21) }
     pub fn opacity(&self)   -> f32 { self.bar_opacity.unwrap_or(1.0).clamp(0.0, 1.0) }
+
+    pub fn nightlight_mode(&self)  -> &str { self.nightlight_mode.as_deref().unwrap_or("scheduled") }
+    pub fn nightlight_temp(&self)  -> u32  { self.nightlight_temp.unwrap_or(4000).clamp(1000, 6500) }
+    pub fn nightlight_start(&self) -> u32  { self.nightlight_start.unwrap_or(20).min(23) }
+    pub fn nightlight_end(&self)   -> u32  { self.nightlight_end.unwrap_or(6).min(23) }
 }
 
 /// Everything that may live in config.toml. All fields optional so a partial
@@ -62,6 +73,12 @@ struct TomlSettings {
     font_path:      Option<String>,
     selected_theme: Option<String>,
     bar_opacity:    Option<f32>,
+    nightlight_mode:  Option<String>,
+    nightlight_temp:  Option<u32>,
+    nightlight_start: Option<u32>,
+    nightlight_end:   Option<u32>,
+    latitude:         Option<f32>,
+    longitude:        Option<f32>,
 }
 
 /// A named base16 color scheme selectable in the Appearance tab.
@@ -219,6 +236,12 @@ impl Config {
             font_path:      ts.font_path.clone(),
             selected_theme: ts.selected_theme.clone(),
             bar_opacity:    ts.bar_opacity.or(Some(1.0)),
+            nightlight_mode:  ts.nightlight_mode.clone(),
+            nightlight_temp:  ts.nightlight_temp,
+            nightlight_start: ts.nightlight_start,
+            nightlight_end:   ts.nightlight_end,
+            latitude:         ts.latitude,
+            longitude:        ts.longitude,
         }
     }
 }
@@ -250,6 +273,12 @@ impl Default for Config {
             font_path:       None,
             selected_theme:  None,
             bar_opacity:     Some(1.0),
+            nightlight_mode:  None,
+            nightlight_temp:  None,
+            nightlight_start: None,
+            nightlight_end:   None,
+            latitude:         None,
+            longitude:        None,
         }
     }
 }

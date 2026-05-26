@@ -298,9 +298,13 @@ fn draw_top_on(
     let mut hits: Vec<HitRegion> = Vec::new();
 
     let fsz    = config.font_size.unwrap_or(11.0) * sf;
+    // Blocks scale with the bar height and are vertically centered, so content
+    // stays centered at any configured bar/taskbar height.
+    let bh_log = (height as f32 - 4.0).max(12.0);
     let pad    = 2.0 * sf;
-    let bh     = 18.0 * sf;
-    let text_y = pad + bh * 0.75;
+    let bh     = bh_log * sf;
+    let vc     = ph as f32 / 2.0;
+    let text_y = vc + fsz * 0.36;
 
     // ── Workspaces (filtered to this output) ────────────────────────────
     let output_name = out.output_name.as_deref();
@@ -313,7 +317,7 @@ fn draw_top_on(
             .collect();
     workspaces.sort_by_key(|w| w.idx);
 
-    let bsz = 18.0 * sf;
+    let bsz = bh;
     let mut x = 4.0 * sf;
     for ws in &workspaces {
         let has_windows = ws.active_window_id.is_some();
@@ -327,7 +331,7 @@ fn draw_top_on(
         r.draw_rect(x, pad, bsz, bsz, fill);
         r.draw_rect_outline(x, pad, bsz, bsz, &config.colors.base02, 1.5 * sf);
         hits.push(HitRegion {
-            x: x / sf, y: 2.0, w: bsz / sf, h: 18.0,
+            x: x / sf, y: 2.0, w: bsz / sf, h: bh_log,
             action: BarAction::FocusWorkspace { id: ws.id },
         });
 
@@ -342,13 +346,14 @@ fn draw_top_on(
         let tw  = r.measure_text(&num, fsz);
         r.draw_text(&num, x + (bsz - tw) / 2.0, text_y, fsz, text_color);
 
-        x += 20.0 * sf;
+        x += bsz + 2.0 * sf;
     }
 
     // ── Center: launcher (NixOS) + settings ─────────────────────────────
     let cx = pw as f32 / 2.0;
     let cx_log = width as f32 / 2.0;
     let icon_fsz = fsz * 1.5;
+    let icon_base = vc + icon_fsz * 0.36;
 
     let launch_label = "\u{f313}";
     let lw = 36.0 * sf;
@@ -356,9 +361,9 @@ fn draw_top_on(
     r.draw_rect(lx, pad, lw, bh, &config.colors.base01);
     r.draw_rect_outline(lx, pad, lw, bh, &config.colors.base02, 1.5 * sf);
     let ltw = r.measure_text(launch_label, icon_fsz);
-    r.draw_text(launch_label, lx + (lw - ltw) / 2.0, pad + bh * 0.82, icon_fsz, &config.colors.base0d);
+    r.draw_text(launch_label, lx + (lw - ltw) / 2.0, icon_base, icon_fsz, &config.colors.base0d);
     hits.push(HitRegion {
-        x: cx_log - 38.0, y: 2.0, w: 36.0, h: 18.0,
+        x: cx_log - 38.0, y: 2.0, w: 36.0, h: bh_log,
         action: BarAction::Spawn { cmd: "vitolauncher".into() },
     });
 
@@ -368,9 +373,9 @@ fn draw_top_on(
     r.draw_rect(sx, pad, sw, bh, &config.colors.base01);
     r.draw_rect_outline(sx, pad, sw, bh, &config.colors.base02, 1.5 * sf);
     let stw = r.measure_text(cfg_label, icon_fsz);
-    r.draw_text(cfg_label, sx + (sw - stw) / 2.0, pad + bh * 0.82, icon_fsz, &config.colors.base0e);
+    r.draw_text(cfg_label, sx + (sw - stw) / 2.0, icon_base, icon_fsz, &config.colors.base0e);
     hits.push(HitRegion {
-        x: cx_log + 2.0, y: 2.0, w: 22.0, h: 18.0,
+        x: cx_log + 2.0, y: 2.0, w: 22.0, h: bh_log,
         action: BarAction::Spawn { cmd: "vitosettings".into() },
     });
 
@@ -386,10 +391,10 @@ fn draw_top_on(
             r.draw_rect(rx, pad, bw, bh, &config.colors.base01);
             r.draw_rect_outline(rx, pad, bw, bh, &config.colors.base02, 1.5 * sf);
             let iw = r.measure_text($icon, icon_fsz);
-            r.draw_text($icon, rx + 4.0 * sf, pad + bh * 0.82, icon_fsz, $color);
+            r.draw_text($icon, rx + 4.0 * sf, icon_base, icon_fsz, $color);
             r.draw_text($text, rx + 4.0 * sf + iw + 2.0 * sf, text_y, fsz, $color);
             hits.push(HitRegion {
-                x: rx / sf, y: 2.0, w: bw / sf, h: 18.0,
+                x: rx / sf, y: 2.0, w: bw / sf, h: bh_log,
                 action: BarAction::Spawn { cmd: $cmd.into() },
             });
             rx -= gap;
@@ -409,7 +414,13 @@ fn draw_top_on(
         status_block!(68.0, "\u{f2c9}", &format!(" {:>2.0}°C", ct),              &config.colors.base09, "vitosettings");
     }
     if let Some(gt) = stats.gpu_temp {
-        status_block!(68.0, "\u{f26c}", &format!(" {:>2.0}°C", gt),              &config.colors.base08, "vitosettings");
+        // Prefer a graphics-card glyph; fall back to the microchip if the font
+        // lacks the Material expansion-card codepoints.
+        let gpu_icon = ["\u{f0fb9}", "\u{f08ae}", "\u{f26c}"]
+            .into_iter()
+            .find(|c| render::glyph_exists(c.chars().next().unwrap()))
+            .unwrap_or("\u{f26c}");
+        status_block!(68.0, gpu_icon, &format!(" {:>2.0}°C", gt),                &config.colors.base08, "vitosettings");
     }
 
     let (bt_icon, bt_text, bt_col) = match &stats.bluetooth.status {
@@ -436,7 +447,7 @@ fn draw_top_on(
 
         let icon_phys = (14.0 * sf) as u32;
         let icon_x = (rx + (icon_block_w - 14.0 * sf) / 2.0) as u32;
-        let icon_y = (pad + (bh - 14.0 * sf) / 2.0) as u32;
+        let icon_y = ((ph as f32 - 14.0 * sf) / 2.0).max(0.0) as u32;
 
         let mut drawn = false;
         // Prefer pixmap from D-Bus if available
@@ -466,12 +477,12 @@ fn draw_top_on(
         if !drawn {
             let glyph = app_icon(&tray_item.id);
             let gw = r.measure_text(glyph, fsz);
-            r.draw_text(glyph, rx + (icon_block_w - gw) / 2.0, pad + bh * 0.82, fsz, &config.colors.base05);
+            r.draw_text(glyph, rx + (icon_block_w - gw) / 2.0, text_y, fsz, &config.colors.base05);
         }
 
         // Hit region: left-click activates, right-click shows menu
         hits.push(HitRegion {
-            x: rx / sf, y: 2.0, w: icon_block_w / sf, h: 18.0,
+            x: rx / sf, y: 2.0, w: icon_block_w / sf, h: bh_log,
             action: BarAction::TrayActivate {
                 service: tray_item.service.clone(),
                 id: tray_item.id.clone(),
@@ -541,9 +552,12 @@ fn draw_bot_on(
     r.draw_rect(0.0, 0.0, pw as f32, sf, &config.colors.base0d);
 
     let fsz       = config.font_size.unwrap_or(11.0) * sf;
+    // Blocks scale with the taskbar height and are vertically centered.
+    let bh_log    = (height as f32 - 4.0).max(12.0);
     let pad       = 2.0 * sf;
-    let bh        = 18.0 * sf;
-    let text_y    = pad + bh * 0.75;
+    let bh        = bh_log * sf;
+    let vc        = ph as f32 / 2.0;
+    let text_y    = vc + fsz * 0.36;
     let badge_fsz = (fsz - sf).max(8.0 * sf);
 
     let output_name = out.output_name.as_deref();
@@ -587,9 +601,9 @@ fn draw_bot_on(
 
         // Workspace badge
         let bdg_x = tx + 3.0 * sf;
-        let bdg_y = 4.0 * sf;
         let bdg_w = 13.0 * sf;
         let bdg_h = 12.0 * sf;
+        let bdg_y = vc - bdg_h / 2.0;
         r.draw_rect(bdg_x, bdg_y, bdg_w, bdg_h, &config.colors.base00);
         r.draw_rect_outline(bdg_x, bdg_y, bdg_w, bdg_h, &config.colors.base03, 1.0 * sf);
         let ws_idx = win.workspace_id.and_then(|id| ws_map.get(&id)).copied().unwrap_or(0);
@@ -602,7 +616,7 @@ fn draw_bot_on(
         let app_id       = win.app_id.as_deref().unwrap_or("unknown");
         let icon_phys    = (14.0 * sf) as u32;
         let icon_x_phys  = (tx + 19.0 * sf) as u32;
-        let icon_y_phys  = (pad + (bh - 14.0 * sf) / 2.0) as u32;
+        let icon_y_phys  = ((ph as f32 - 14.0 * sf) / 2.0).max(0.0) as u32;
         let icon_logical = 14.0 * sf;
 
         if let Some(rgba) = icons::load(app_id, icon_phys) {
@@ -630,7 +644,7 @@ fn draw_bot_on(
         r.draw_text(&clipped, label_x, text_y, fsz, text_col);
 
         hits.push(HitRegion {
-            x: tx / sf, y: 2.0, w: 160.0, h: 18.0,
+            x: tx / sf, y: 2.0, w: 160.0, h: bh_log,
             action: BarAction::FocusWindow { id: win.id },
         });
         tx += block_w + 4.0 * sf;

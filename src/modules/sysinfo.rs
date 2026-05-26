@@ -157,6 +157,12 @@ fn get_temps(components: &Components) -> (Option<f32>, Option<f32>) {
         gpu_temp = gpu_fallback;
     }
 
+    // Prefer a direct amdgpu hwmon reading: it disambiguates the discrete card
+    // from the integrated GPU more reliably than sysinfo's component labels.
+    if let Some(t) = gpu_temp_hwmon() {
+        gpu_temp = Some(t);
+    }
+
     // Fallback for nvidia: nvidia-smi
     if gpu_temp.is_none() {
         gpu_temp = std::process::Command::new("nvidia-smi")
@@ -167,6 +173,44 @@ fn get_temps(components: &Components) -> (Option<f32>, Option<f32>) {
     }
 
     (cpu_temp, gpu_temp)
+}
+
+/// Read a hwmon `tempN_input` file (millidegrees C) into degrees C.
+fn read_hwmon_temp(path: &std::path::Path) -> Option<f32> {
+    std::fs::read_to_string(path)
+        .ok()
+        .and_then(|s| s.trim().parse::<f32>().ok())
+        .map(|v| v / 1000.0)
+        .filter(|t| *t > 0.0 && *t < 150.0)
+}
+
+/// Read the AMD GPU edge temperature straight from hwmon. When both a discrete
+/// and an integrated AMD GPU are present, prefer the discrete card (it exposes
+/// junction/memory sensors that the integrated Raphael GPU lacks).
+fn gpu_temp_hwmon() -> Option<f32> {
+    let entries = std::fs::read_dir("/sys/class/hwmon").ok()?;
+    let mut best: Option<(bool, f32)> = None; // (is_discrete, edge_temp)
+    for entry in entries.flatten() {
+        let base = entry.path();
+        match std::fs::read_to_string(base.join("name")) {
+            Ok(n) if n.trim() == "amdgpu" => {}
+            _ => continue,
+        }
+        let edge = match read_hwmon_temp(&base.join("temp1_input")) {
+            Some(t) => t,
+            None => continue,
+        };
+        let is_discrete = base.join("temp2_input").exists()
+            || base.join("temp3_input").exists();
+        let better = match best {
+            None => true,
+            Some((bd, bt)) => (is_discrete && !bd) || (is_discrete == bd && edge > bt),
+        };
+        if better {
+            best = Some((is_discrete, edge));
+        }
+    }
+    best.map(|(_, t)| t)
 }
 
 fn get_battery() -> Option<f32> {
