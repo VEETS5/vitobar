@@ -46,8 +46,8 @@ pub struct Config {
 }
 
 impl Config {
-    pub fn bar_h(&self)     -> u32 { self.bar_height.unwrap_or(22) }
-    pub fn taskbar_h(&self) -> u32 { self.taskbar_height.unwrap_or(22) }
+    pub fn bar_h(&self)     -> u32 { self.bar_height.unwrap_or(21) }
+    pub fn taskbar_h(&self) -> u32 { self.taskbar_height.unwrap_or(21) }
     pub fn opacity(&self)   -> f32 { self.bar_opacity.unwrap_or(1.0).clamp(0.0, 1.0) }
 }
 
@@ -208,8 +208,8 @@ impl Config {
     fn from_settings(colors: Colors, ts: &TomlSettings) -> Self {
         Self {
             colors,
-            bar_height:     ts.bar_height.or(Some(22)),
-            taskbar_height: ts.taskbar_height.or(Some(22)),
+            bar_height:     ts.bar_height.or(Some(21)),
+            taskbar_height: ts.taskbar_height.or(Some(21)),
             font_size:      ts.font_size.or(Some(11.0)),
             font_path:      ts.font_path.clone(),
             selected_theme: ts.selected_theme.clone(),
@@ -239,8 +239,8 @@ impl Default for Config {
                 base0e: "cba6f7".into(),
                 base0f: "f2cdcd".into(),
             },
-            bar_height:      Some(22),
-            taskbar_height:  Some(22),
+            bar_height:      Some(21),
+            taskbar_height:  Some(21),
             font_size:       Some(11.0),
             font_path:       None,
             selected_theme:  None,
