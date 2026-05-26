@@ -257,15 +257,25 @@ pub fn build_widgets(cat: Category, config: &crate::config::Config) -> Vec<Widge
             let opacity_pct = config.opacity() * 100.0;
 
             // ── Theme picker ──────────────────────────────────────────────
+            // First option follows Stylix (empty value = clear the override).
             let themes = crate::config::available_themes();
-            let theme_opts: Vec<SelectorOption> = themes.iter().map(|t| SelectorOption {
+            let mut theme_opts: Vec<SelectorOption> = vec![SelectorOption {
+                label:    "Stylix".into(),
+                value:    String::new(),
+                swatches: crate::config::stylix_colors().map(|c| c.swatches()),
+            }];
+            theme_opts.extend(themes.iter().map(|t| SelectorOption {
                 label:    t.name.clone(),
                 value:    t.name.clone(),
                 swatches: Some(t.colors.swatches()),
-            }).collect();
-            let theme_sel = config.selected_theme.as_deref()
-                .and_then(|name| themes.iter().position(|t| t.name == name))
-                .unwrap_or(usize::MAX);
+            }));
+            // index 0 = Stylix; real themes are offset by 1.
+            let theme_sel = match config.selected_theme.as_deref() {
+                Some(name) if !name.is_empty() => {
+                    themes.iter().position(|t| t.name == name).map(|i| i + 1).unwrap_or(0)
+                }
+                _ => 0,
+            };
 
             // ── Density presets (mini/compact/default/comfortable/spacious) ─
             let densities: &[(&str, u32)] = &[
@@ -291,7 +301,7 @@ pub fn build_widgets(cat: Category, config: &crate::config::Config) -> Vec<Widge
                 },
                 Widget::InfoRow {
                     label: "".into(),
-                    value: "Restart the bar to apply a new theme".into(),
+                    value: "Stylix follows your system colors. Restart the bar to apply.".into(),
                 },
 
                 Widget::SectionHeader { label: "Bar".into() },
