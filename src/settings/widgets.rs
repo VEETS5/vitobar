@@ -79,10 +79,91 @@ fn get_kernel_version() -> String {
 }
 
 fn get_uptime() -> String {
-    let out = std::process::Command::new("uptime")
-        .arg("-p").output().ok();
-    out.map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+    let secs = std::fs::read_to_string("/proc/uptime")
+        .ok()
+        .and_then(|s| s.split_whitespace().next().map(str::to_string))
+        .and_then(|s| s.parse::<f64>().ok())
+        .unwrap_or(0.0) as u64;
+    let d = secs / 86400;
+    let h = (secs % 86400) / 3600;
+    let m = (secs % 3600) / 60;
+    if d > 0 {
+        format!("{}d {}h {}m", d, h, m)
+    } else if h > 0 {
+        format!("{}h {}m", h, m)
+    } else {
+        format!("{}m", m)
+    }
+}
+
+fn get_os_name() -> String {
+    std::fs::read_to_string("/etc/os-release")
+        .ok()
+        .and_then(|s| {
+            s.lines()
+                .find(|l| l.starts_with("PRETTY_NAME="))
+                .map(|l| l.trim_start_matches("PRETTY_NAME=").trim_matches('"').to_string())
+        })
+        .unwrap_or_else(|| "Linux".into())
+}
+
+fn get_nixos_version() -> String {
+    std::process::Command::new("nixos-version")
+        .output()
+        .ok()
+        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+        .filter(|s| !s.is_empty())
         .unwrap_or_else(|| "unknown".into())
+}
+
+fn get_wm() -> String {
+    let ver = std::process::Command::new("niri")
+        .arg("--version")
+        .output()
+        .ok()
+        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+        .filter(|s| !s.is_empty());
+    match ver {
+        Some(v) => v,
+        None => "niri".into(),
+    }
+}
+
+fn get_shell() -> String {
+    std::env::var("SHELL")
+        .ok()
+        .map(|s| s.rsplit('/').next().unwrap_or(&s).to_string())
+        .unwrap_or_else(|| "unknown".into())
+}
+
+fn get_gpu_model() -> String {
+    let out = std::process::Command::new("lspci").output().ok();
+    out.and_then(|o| {
+        let text = String::from_utf8_lossy(&o.stdout).to_string();
+        text.lines()
+            .find(|l| l.contains("VGA compatible controller") || l.contains("3D controller"))
+            .and_then(|l| l.splitn(2, ':').nth(1))
+            .and_then(|rest| rest.splitn(2, ':').nth(1))
+            .map(|s| s.trim().to_string())
+    })
+    .filter(|s| !s.is_empty())
+    .unwrap_or_else(|| "unknown".into())
+}
+
+fn get_ram_usage() -> String {
+    let content = std::fs::read_to_string("/proc/meminfo").unwrap_or_default();
+    let read_kb = |key: &str| -> u64 {
+        content.lines()
+            .find(|l| l.starts_with(key))
+            .and_then(|l| l.split_whitespace().nth(1))
+            .and_then(|s| s.parse::<u64>().ok())
+            .unwrap_or(0)
+    };
+    let total = read_kb("MemTotal:");
+    let avail = read_kb("MemAvailable:");
+    let used = total.saturating_sub(avail);
+    let gb = |kb: u64| kb as f64 / 1_048_576.0;
+    format!("{:.1} / {:.1} GB", gb(used), gb(total))
 }
 
 fn get_cpu_model() -> String {
@@ -92,16 +173,6 @@ fn get_cpu_model() -> String {
         .and_then(|l| l.splitn(2, ':').nth(1))
         .map(|s| s.trim().to_string())
         .unwrap_or_else(|| "unknown".into())
-}
-
-fn get_total_ram_gb() -> String {
-    let content = std::fs::read_to_string("/proc/meminfo").unwrap_or_default();
-    let kb = content.lines()
-        .find(|l| l.starts_with("MemTotal:"))
-        .and_then(|l| l.split_whitespace().nth(1))
-        .and_then(|s| s.parse::<u64>().ok())
-        .unwrap_or(0);
-    format!("{:.1} GB", kb as f64 / 1_048_576.0)
 }
 
 fn get_disk_usage(path: &str) -> String {
@@ -121,11 +192,12 @@ fn get_disk_usage(path: &str) -> String {
     }).unwrap_or_else(|| "unknown".into())
 }
 
-fn get_power_profile() -> String {
-    let out = std::process::Command::new("powerprofilesctl")
-        .arg("get").output().ok();
-    out.map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
-        .unwrap_or_else(|| "unavailable".into())
+/// Active power profile, or None when power-profiles-daemon is unavailable.
+fn get_power_profile() -> Option<String> {
+    let out = std::process::Command::new("powerprofilesctl").arg("get").output().ok()?;
+    if !out.status.success() { return None; }
+    let s = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    if s.is_empty() { None } else { Some(s) }
 }
 
 fn get_battery_status() -> String {
@@ -208,44 +280,56 @@ fn get_bt_paired_devices() -> Vec<String> {
     }).unwrap_or_default()
 }
 
-fn get_current_wallpaper() -> String {
-    // Check swaybg, swww, or niri config for wallpaper path
-    let out = std::process::Command::new("pgrep")
-        .args(["-a", "swaybg"])
-        .output().ok();
-    if let Some(o) = out {
-        let text = String::from_utf8_lossy(&o.stdout).to_string();
-        if let Some(line) = text.lines().next() {
-            if let Some(img) = line.split("-i ").nth(1) {
-                let path = img.split_whitespace().next().unwrap_or(img);
-                return path.to_string();
-            }
-        }
-    }
-    let out = std::process::Command::new("swww")
-        .args(["query"])
-        .output().ok();
-    if let Some(o) = out {
-        let text = String::from_utf8_lossy(&o.stdout).to_string();
-        if let Some(line) = text.lines().next() {
-            if let Some(img) = line.split("image: ").nth(1) {
-                return img.trim().to_string();
-            }
-        }
-    }
-    "Unknown".into()
+/// True if `cmd` is found on PATH.
+fn command_exists(cmd: &str) -> bool {
+    std::process::Command::new("sh")
+        .args(["-c", &format!("command -v {} >/dev/null 2>&1", cmd)])
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false)
 }
 
-fn get_wallpaper_tool() -> &'static str {
-    if std::process::Command::new("which").arg("swww").output()
-        .map(|o| o.status.success()).unwrap_or(false) {
-        "swww"
-    } else if std::process::Command::new("which").arg("swaybg").output()
-        .map(|o| o.status.success()).unwrap_or(false) {
-        "swaybg"
-    } else {
-        "none"
+/// True if a Bluetooth controller is present on the system.
+fn bt_adapter_present() -> bool {
+    if let Ok(rd) = std::fs::read_dir("/sys/class/bluetooth") {
+        if rd.flatten().next().is_some() {
+            return true;
+        }
     }
+    std::process::Command::new("timeout")
+        .args(["2", "bluetoothctl", "list"])
+        .output()
+        .map(|o| !String::from_utf8_lossy(&o.stdout).trim().is_empty())
+        .unwrap_or(false)
+}
+
+/// First installed Bluetooth manager GUI, if any.
+fn bt_manager() -> Option<&'static str> {
+    ["blueman-manager", "overskride", "blueberry"]
+        .into_iter()
+        .find(|m| command_exists(m))
+}
+
+/// Build the wlsunset invocation for the current night-light config. The
+/// command kills any running instance first so it can be re-applied live.
+fn build_nightlight_cmd(config: &crate::config::Config) -> String {
+    let temp = config.nightlight_temp();
+    if config.nightlight_mode() == "auto" {
+        if let (Some(lat), Some(lon)) = (config.latitude, config.longitude) {
+            return format!(
+                "pkill wlsunset; wlsunset -l {:.4} -L {:.4} -t {} -T 6500",
+                lat, lon, temp
+            );
+        }
+    }
+    // Scheduled (also the fallback when Auto has no location): -s is sunset
+    // (night begins), -S is sunrise (night ends).
+    let start = config.nightlight_start();
+    let end = config.nightlight_end();
+    format!(
+        "pkill wlsunset; wlsunset -S {:02}:00 -s {:02}:00 -t {} -T 6500",
+        end, start, temp
+    )
 }
 
 pub fn build_widgets(cat: Category, config: &crate::config::Config) -> Vec<Widget> {
@@ -351,21 +435,61 @@ pub fn build_widgets(cat: Category, config: &crate::config::Config) -> Vec<Widge
         }
 
         Category::Display => {
-            let brightness = get_brightness_pct();
-            vec![
-                Widget::SectionHeader { label: "Screen".into() },
-                Widget::Slider {
-                    label: "Brightness".into(),
-                    value: brightness as f32 / 100.0,
-                    cmd_template: "brightnessctl set {}%",
+            let mode = config.nightlight_mode();
+            let temp = config.nightlight_temp();
+            let mode_opts = vec![
+                SelectorOption { label: "Scheduled".into(),      value: "scheduled".into(), swatches: None },
+                SelectorOption { label: "Auto (location)".into(), value: "auto".into(),      swatches: None },
+            ];
+            let mode_sel = if mode == "auto" { 1 } else { 0 };
+
+            let mut widgets = vec![
+                Widget::SectionHeader { label: "Night Light".into() },
+                Widget::InfoRow {
+                    label: "".into(),
+                    value: "Warms screen colors to reduce blue light (needs wlsunset).".into(),
                 },
-                Widget::Toggle {
-                    label:   "Night Light".into(),
-                    value:   is_night_light_on(),
-                    cmd_on:  "hyprsunset -t 4000",
-                    cmd_off: "pkill hyprsunset",
+                Widget::Selector {
+                    label:    "Mode".into(),
+                    options:  mode_opts,
+                    selected: mode_sel,
+                    key:      "nightlight_mode",
                 },
-            ]
+                Widget::ConfigSlider {
+                    label: "Temperature (K)".into(),
+                    value: ((temp as f32 - 2500.0) / 3500.0).clamp(0.0, 1.0),  // 2500..6000, lower = warmer
+                    min: 2500.0,
+                    max: 6000.0,
+                    key: "nightlight_temp",
+                },
+            ];
+            if mode == "auto" {
+                let loc = match (config.latitude, config.longitude) {
+                    (Some(la), Some(lo)) => format!("{:.3}, {:.3}", la, lo),
+                    _ => "Set latitude/longitude in config.toml".into(),
+                };
+                widgets.push(Widget::InfoRow { label: "Location".into(), value: loc });
+            } else {
+                widgets.push(Widget::ConfigSlider {
+                    label: "Night starts (h)".into(),
+                    value: (config.nightlight_start() as f32 / 23.0).clamp(0.0, 1.0),
+                    min: 0.0, max: 23.0, key: "nightlight_start",
+                });
+                widgets.push(Widget::ConfigSlider {
+                    label: "Night ends (h)".into(),
+                    value: (config.nightlight_end() as f32 / 23.0).clamp(0.0, 1.0),
+                    min: 0.0, max: 23.0, key: "nightlight_end",
+                });
+            }
+            widgets.push(Widget::Button {
+                label: "\u{f185}  Apply Night Light".into(),
+                cmd:   build_nightlight_cmd(config),
+            });
+            widgets.push(Widget::Button {
+                label: "\u{f186}  Turn Off".into(),
+                cmd:   "pkill wlsunset".into(),
+            });
+            widgets
         }
 
         Category::Audio => {
@@ -400,28 +524,36 @@ pub fn build_widgets(cat: Category, config: &crate::config::Config) -> Vec<Widge
         }
 
         Category::Bluetooth => {
+            if !bt_adapter_present() {
+                return vec![
+                    Widget::SectionHeader { label: "Bluetooth".into() },
+                    Widget::InfoRow { label: "Status".into(), value: "No adapter found".into() },
+                ];
+            }
             let bt = get_bt_info();
             let mut widgets = vec![
                 Widget::SectionHeader { label: "Bluetooth".into() },
                 Widget::Toggle {
                     label:   "Power".into(),
                     value:   bt.powered,
-                    cmd_on:  "rfkill unblock bluetooth && bluetoothctl power on",
+                    cmd_on:  "rfkill unblock bluetooth; bluetoothctl power on",
                     cmd_off: "bluetoothctl power off",
                 },
                 Widget::InfoRow {
                     label: "Status".into(),
                     value: bt.status_text,
                 },
-                Widget::Button {
-                    label: "\u{f294}  Open Bluetooth Manager".into(),
-                    cmd:   "blueman-manager".into(),
-                },
-                Widget::Button {
-                    label: "\u{f002}  Scan for Devices".into(),
-                    cmd:   "timeout 10 bluetoothctl scan on".into(),
-                },
             ];
+            match bt_manager() {
+                Some(mgr) => widgets.push(Widget::Button {
+                    label: "\u{f294}  Open Bluetooth Manager".into(),
+                    cmd:   mgr.into(),
+                }),
+                None => widgets.push(Widget::InfoRow {
+                    label: "Manager".into(),
+                    value: "Install blueman, overskride, or blueberry".into(),
+                }),
+            }
             let paired = get_bt_paired_devices();
             if !paired.is_empty() {
                 widgets.push(Widget::SectionHeader { label: "Paired Devices".into() });
@@ -456,144 +588,64 @@ pub fn build_widgets(cat: Category, config: &crate::config::Config) -> Vec<Widge
             ]
         }
 
-        Category::Wallpaper => {
-            let current = get_current_wallpaper();
-            let tool = get_wallpaper_tool();
-            let mut widgets = vec![
-                Widget::SectionHeader { label: "Current Wallpaper".into() },
-                Widget::InfoRow {
-                    label: "Path".into(),
-                    value: current,
-                },
-                Widget::InfoRow {
-                    label: "Backend".into(),
-                    value: tool.to_string(),
-                },
-                Widget::SectionHeader { label: "Actions".into() },
-            ];
-            match tool {
-                "swww" => {
-                    widgets.push(Widget::Button {
-                        label: "\u{f021}  Initialize swww".into(),
-                        cmd: "swww-daemon".into(),
-                    });
-                    widgets.push(Widget::Button {
-                        label: "\u{f03e}  Set Wallpaper (swww)".into(),
-                        cmd: "swww img ~/Pictures/wallpaper.png --transition-type fade".into(),
-                    });
-                }
-                "swaybg" => {
-                    widgets.push(Widget::Button {
-                        label: "\u{f03e}  Set Wallpaper (swaybg)".into(),
-                        cmd: "swaybg -i ~/Pictures/wallpaper.png -m fill".into(),
-                    });
-                }
-                _ => {
-                    widgets.push(Widget::InfoRow {
-                        label: "Note".into(),
-                        value: "No wallpaper tool found (swww/swaybg)".into(),
-                    });
-                }
+        Category::Power => {
+            let mut widgets = vec![];
+
+            let bat = get_battery_status();
+            if bat != "No battery" {
+                widgets.push(Widget::SectionHeader { label: "Battery".into() });
+                widgets.push(Widget::InfoRow { label: "Status".into(), value: bat });
             }
-            widgets.push(Widget::SectionHeader { label: "Tips".into() });
-            widgets.push(Widget::InfoRow {
-                label: "".into(),
-                value: "Set wallpaper in niri config for persistence".into(),
-            });
+
+            widgets.push(Widget::SectionHeader { label: "Power Profile".into() });
+            match get_power_profile() {
+                Some(active) => {
+                    let opts = vec![
+                        SelectorOption { label: "Power Saver".into(), value: "power-saver".into(), swatches: None },
+                        SelectorOption { label: "Balanced".into(),    value: "balanced".into(),    swatches: None },
+                        SelectorOption { label: "Performance".into(), value: "performance".into(), swatches: None },
+                    ];
+                    let sel = opts.iter().position(|o| o.value == active).unwrap_or(usize::MAX);
+                    widgets.push(Widget::Selector {
+                        label:    "Profile".into(),
+                        options:  opts,
+                        selected: sel,
+                        key:      "power_profile",
+                    });
+                }
+                None => widgets.push(Widget::InfoRow {
+                    label: "Profile".into(),
+                    value: "power-profiles-daemon not available".into(),
+                }),
+            }
+
+            widgets.push(Widget::SectionHeader { label: "Session".into() });
+            widgets.push(Widget::Button { label: "\u{f186}  Suspend".into(),   cmd: "systemctl suspend".into() });
+            widgets.push(Widget::Button { label: "\u{f7c9}  Hibernate".into(), cmd: "systemctl hibernate".into() });
+            widgets.push(Widget::Button { label: "\u{f021}  Reboot".into(),    cmd: "systemctl reboot".into() });
+            widgets.push(Widget::Button { label: "\u{f011}  Shutdown".into(),  cmd: "systemctl poweroff".into() });
             widgets
         }
 
-        Category::Power => {
-            let bat     = get_battery_status();
-            let profile = get_power_profile();
-            vec![
-                Widget::SectionHeader { label: "Battery".into() },
-                Widget::InfoRow {
-                    label: "Status".into(),
-                    value: bat,
-                },
-                Widget::SectionHeader { label: "Power Profile".into() },
-                Widget::InfoRow {
-                    label: "Active".into(),
-                    value: profile,
-                },
-                Widget::Button {
-                    label: "\u{f0e7}  Performance".into(),
-                    cmd:   "powerprofilesctl set performance".into(),
-                },
-                Widget::Button {
-                    label: "\u{f24e}  Balanced".into(),
-                    cmd:   "powerprofilesctl set balanced".into(),
-                },
-                Widget::Button {
-                    label: "\u{f06c}  Power Saver".into(),
-                    cmd:   "powerprofilesctl set power-saver".into(),
-                },
-                Widget::SectionHeader { label: "Session".into() },
-                Widget::Button {
-                    label: "\u{f186}  Suspend".into(),
-                    cmd:   "systemctl suspend".into(),
-                },
-                Widget::Button {
-                    label: "\u{f7c9}  Hibernate".into(),
-                    cmd:   "systemctl hibernate".into(),
-                },
-                Widget::Button {
-                    label: "\u{f021}  Reboot".into(),
-                    cmd:   "systemctl reboot".into(),
-                },
-                Widget::Button {
-                    label: "\u{f011}  Shutdown".into(),
-                    cmd:   "systemctl poweroff".into(),
-                },
-            ]
-        }
-
         Category::System => {
-            let hostname   = read_hostname();
-            let kernel     = get_kernel_version();
-            let uptime     = get_uptime();
-            let cpu        = get_cpu_model();
-            let ram        = get_total_ram_gb();
-            let disk_root  = get_disk_usage("/");
-            let disk_home  = get_disk_usage("/home");
-            let generation = get_nix_generation();
             vec![
-                Widget::SectionHeader { label: "About This Machine".into() },
-                Widget::InfoRow { label: "Hostname".into(),  value: hostname.clone() },
-                Widget::InfoRow { label: "Kernel".into(),    value: kernel },
-                Widget::InfoRow { label: "Uptime".into(),    value: uptime },
+                Widget::SectionHeader { label: "System".into() },
+                Widget::InfoRow { label: "OS".into(),        value: get_os_name() },
+                Widget::InfoRow { label: "Hostname".into(),  value: read_hostname() },
+                Widget::InfoRow { label: "Kernel".into(),    value: get_kernel_version() },
+                Widget::InfoRow { label: "WM".into(),        value: get_wm() },
+                Widget::InfoRow { label: "Shell".into(),     value: get_shell() },
+                Widget::InfoRow { label: "Uptime".into(),    value: get_uptime() },
                 Widget::SectionHeader { label: "Hardware".into() },
-                Widget::InfoRow { label: "CPU".into(),       value: cpu },
-                Widget::InfoRow { label: "Memory".into(),    value: ram },
+                Widget::InfoRow { label: "CPU".into(),       value: get_cpu_model() },
+                Widget::InfoRow { label: "GPU".into(),       value: get_gpu_model() },
+                Widget::InfoRow { label: "Memory".into(),    value: get_ram_usage() },
                 Widget::SectionHeader { label: "Storage".into() },
-                Widget::InfoRow { label: "/".into(),         value: disk_root },
-                Widget::InfoRow { label: "/home".into(),     value: disk_home },
+                Widget::InfoRow { label: "/".into(),         value: get_disk_usage("/") },
+                Widget::InfoRow { label: "/home".into(),     value: get_disk_usage("/home") },
                 Widget::SectionHeader { label: "NixOS".into() },
-                Widget::InfoRow {
-                    label: "Generation".into(),
-                    value: generation,
-                },
-                Widget::Button {
-                    label: "\u{f021}  Flake Update".into(),
-                    cmd:   "nix flake update /etc/nixos".into(),
-                },
-                Widget::Button {
-                    label: "\u{f1b2}  Rebuild Switch".into(),
-                    cmd:   format!("sudo nixos-rebuild switch --flake /etc/nixos#{}", hostname),
-                },
-                Widget::Button {
-                    label: "\u{f019}  Rebuild Boot".into(),
-                    cmd:   format!("sudo nixos-rebuild boot --flake /etc/nixos#{}", hostname),
-                },
-                Widget::Button {
-                    label: "\u{f1f8}  Garbage Collect".into(),
-                    cmd:   "nix store gc".into(),
-                },
-                Widget::Button {
-                    label: "\u{f0b0}  Optimise Store".into(),
-                    cmd:   "nix store optimise".into(),
-                },
+                Widget::InfoRow { label: "Version".into(),    value: get_nixos_version() },
+                Widget::InfoRow { label: "Generation".into(), value: get_nix_generation() },
             ]
         }
     }
@@ -647,40 +699,7 @@ fn run_cmd(cmd: &str) {
         .spawn().ok();
 }
 
-fn is_night_light_on() -> bool {
-    std::process::Command::new("pgrep")
-        .arg("hyprsunset")
-        .output()
-        .map(|o| o.status.success())
-        .unwrap_or(false)
-}
-
 // ── System state readers ──────────────────────────────────────────────────────
-
-fn get_brightness_pct() -> u32 {
-    let try_paths = [
-        "/sys/class/backlight/intel_backlight",
-        "/sys/class/backlight/amdgpu_bl0",
-        "/sys/class/backlight/acpi_video0",
-    ];
-    for base in &try_paths {
-        let current = std::fs::read_to_string(format!("{}/brightness", base))
-            .ok().and_then(|s| s.trim().parse::<u32>().ok());
-        let max = std::fs::read_to_string(format!("{}/max_brightness", base))
-            .ok().and_then(|s| s.trim().parse::<u32>().ok());
-        if let (Some(cur), Some(max)) = (current, max) {
-            if max > 0 { return ((cur as f32 / max as f32) * 100.0) as u32; }
-        }
-    }
-    // Try brightnessctl as fallback
-    let out = std::process::Command::new("brightnessctl")
-        .args(["get"]).output().ok();
-    let current = out.and_then(|o| String::from_utf8_lossy(&o.stdout).trim().parse::<u32>().ok()).unwrap_or(0);
-    let out = std::process::Command::new("brightnessctl")
-        .args(["max"]).output().ok();
-    let max = out.and_then(|o| String::from_utf8_lossy(&o.stdout).trim().parse::<u32>().ok()).unwrap_or(1);
-    if max > 0 { ((current as f32 / max as f32) * 100.0) as u32 } else { 0 }
-}
 
 fn get_volume_pct() -> u32 {
     let out = std::process::Command::new("wpctl")

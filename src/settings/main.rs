@@ -152,6 +152,25 @@ impl SettingsApp {
                         self.config.bar_opacity = Some(v);
                         save_setting("bar_opacity", toml::Value::Float(v as f64));
                     }
+                    "nightlight_temp" => {
+                        let v = value.round() as u32;
+                        self.config.nightlight_temp = Some(v);
+                        save_setting("nightlight_temp", toml::Value::Integer(v as i64));
+                        // Rebuild so the "Apply Night Light" button uses the new value.
+                        self.widgets = build_widgets(self.active_category, &self.config);
+                    }
+                    "nightlight_start" => {
+                        let v = value.round() as u32;
+                        self.config.nightlight_start = Some(v);
+                        save_setting("nightlight_start", toml::Value::Integer(v as i64));
+                        self.widgets = build_widgets(self.active_category, &self.config);
+                    }
+                    "nightlight_end" => {
+                        let v = value.round() as u32;
+                        self.config.nightlight_end = Some(v);
+                        save_setting("nightlight_end", toml::Value::Integer(v as i64));
+                        self.widgets = build_widgets(self.active_category, &self.config);
+                    }
                     _ => {}
                 }
             }
@@ -179,6 +198,14 @@ impl SettingsApp {
                             save_setting("bar_height", toml::Value::Integer(h as i64));
                             save_setting("taskbar_height", toml::Value::Integer(h as i64));
                         }
+                    }
+                    "nightlight_mode" => {
+                        self.config.nightlight_mode = Some(value.clone());
+                        save_setting("nightlight_mode", toml::Value::String(value.clone()));
+                    }
+                    "power_profile" => {
+                        let _ = std::process::Command::new("powerprofilesctl")
+                            .args(["set", &value]).status();
                     }
                     _ => {}
                 }
