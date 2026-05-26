@@ -5,9 +5,10 @@ mod categories;
 mod widgets;
 
 use config::Config;
+use config::{available_themes, save_setting};
 use render::Renderer;
 use categories::Category;
-use widgets::{Widget, WidgetResult, apply_widget_action, build_widgets};
+use widgets::{Widget, WidgetResult, SelectorOption, apply_selector, apply_widget_action, build_widgets};
 
 use smithay_client_toolkit::shell::WaylandSurface;
 use smithay_client_toolkit::{
@@ -44,6 +45,50 @@ const CAT_ROW_H:  f32 = 40.0;
 const WIDGET_ROW_H:   f32 = 48.0;
 const SECTION_ROW_H:  f32 = 30.0;
 const CONTENT_PAD: f32 = 16.0;
+
+// ── Selector layout (all sizes proportional to fsz so the math is identical
+//    in logical units (hit-testing/heights) and physical units (drawing)) ──
+
+fn selector_chip_rects(options: &[SelectorOption], cw: f32, fsz: f32) -> (Vec<(f32, f32, f32, f32)>, f32) {
+    let chip_h = fsz * 1.9;
+    let gap    = fsz * 0.5;
+    let pad_x  = fsz * 0.7;
+    let mut rects = Vec::with_capacity(options.len());
+    if options.is_empty() {
+        return (rects, 0.0);
+    }
+    let mut x = 0.0f32;
+    let mut row = 0usize;
+    for opt in options {
+        let w = render::measure(&opt.label, fsz * 0.95) + 2.0 * pad_x;
+        if x > 0.0 && x + w > cw {
+            row += 1;
+            x = 0.0;
+        }
+        let ry = row as f32 * (chip_h + gap);
+        rects.push((x, ry, w, chip_h));
+        x += w + gap;
+    }
+    let chips_h = (row + 1) as f32 * (chip_h + gap) - gap;
+    (rects, chips_h.max(0.0))
+}
+
+fn selector_total_height(options: &[SelectorOption], cw: f32, fsz: f32) -> f32 {
+    let label_h = fsz * 1.7;
+    let (_, chips_h) = selector_chip_rects(options, cw, fsz);
+    let swatch_h = if options.iter().any(|o| o.swatches.is_some()) { fsz * 1.4 } else { 0.0 };
+    fsz * 0.4 + label_h + chips_h + swatch_h + fsz * 0.7
+}
+
+/// Logical (unscaled) height of one widget row.
+fn widget_logical_height(w: &Widget, cw: f32, fsz: f32) -> f32 {
+    match w {
+        Widget::SectionHeader { .. }   => SECTION_ROW_H,
+        Widget::InfoRow { .. }         => WIDGET_ROW_H * 0.7,
+        Widget::Selector { options, .. } => selector_total_height(options, cw, fsz),
+        _                              => WIDGET_ROW_H,
+    }
+}
 
 struct SettingsApp {
     registry_state:  RegistryState,
@@ -84,47 +129,88 @@ impl SettingsApp {
     }
 
     fn handle_config_result(&mut self, result: WidgetResult) {
-        if let WidgetResult::ConfigUpdate { key, value } = result {
-            match key {
-                "bar_height" => self.config.bar_height = Some(value.round() as u32),
-                "taskbar_height" => self.config.taskbar_height = Some(value.round() as u32),
-                "font_size" => self.config.font_size = Some((value * 10.0).round() / 10.0),
-                _ => {}
+        match result {
+            WidgetResult::ConfigUpdate { key, value } => {
+                match key {
+                    "bar_height" => {
+                        let v = value.round() as u32;
+                        self.config.bar_height = Some(v);
+                        save_setting("bar_height", toml::Value::Integer(v as i64));
+                    }
+                    "taskbar_height" => {
+                        let v = value.round() as u32;
+                        self.config.taskbar_height = Some(v);
+                        save_setting("taskbar_height", toml::Value::Integer(v as i64));
+                    }
+                    "font_size" => {
+                        let v = (value * 10.0).round() / 10.0;
+                        self.config.font_size = Some(v);
+                        save_setting("font_size", toml::Value::Float(v as f64));
+                    }
+                    "bar_opacity" => {
+                        let v = (value / 100.0).clamp(0.0, 1.0);
+                        self.config.bar_opacity = Some(v);
+                        save_setting("bar_opacity", toml::Value::Float(v as f64));
+                    }
+                    _ => {}
+                }
             }
-            config::save_bar_settings(
-                self.config.bar_height,
-                self.config.taskbar_height,
-                self.config.font_size,
-            );
+            WidgetResult::ConfigUpdateStr { key, value } => {
+                match key {
+                    "selected_theme" => {
+                        self.config.selected_theme = Some(value.clone());
+                        save_setting("selected_theme", toml::Value::String(value.clone()));
+                        // Live-recolor the settings window itself (bar applies on restart).
+                        if let Some(theme) = available_themes().into_iter().find(|t| t.name == value) {
+                            self.config.colors = theme.colors;
+                        }
+                    }
+                    "bar_density" => {
+                        if let Ok(h) = value.parse::<u32>() {
+                            self.config.bar_height = Some(h);
+                            self.config.taskbar_height = Some(h);
+                            save_setting("bar_height", toml::Value::Integer(h as i64));
+                            save_setting("taskbar_height", toml::Value::Integer(h as i64));
+                        }
+                    }
+                    _ => {}
+                }
+                // Rebuild so selectors/sliders reflect the new values.
+                self.widgets = build_widgets(self.active_category, &self.config);
+            }
+            WidgetResult::None => {}
         }
+    }
+
+    /// Logical content width and font size used for hit-testing/heights.
+    fn content_metrics(&self) -> (f32, f32) {
+        let cw  = self.width as f32 - (SIDEBAR_W + CONTENT_PAD) - CONTENT_PAD;
+        let fsz = self.config.font_size.unwrap_or(11.0);
+        (cw, fsz)
     }
 
     fn content_height(&self) -> f32 {
-        let mut h: f32 = 0.0;
-        for widget in &self.widgets {
-            h += match widget {
-                Widget::SectionHeader { .. } => SECTION_ROW_H,
-                Widget::InfoRow { .. }       => WIDGET_ROW_H * 0.7,
-                _                            => WIDGET_ROW_H,
-            };
-        }
-        h
+        let (cw, fsz) = self.content_metrics();
+        self.widgets.iter().map(|w| widget_logical_height(w, cw, fsz)).sum()
     }
 
     fn widget_at_y(&self, content_ly: f32) -> Option<usize> {
+        let (cw, fsz) = self.content_metrics();
         let mut wy: f32 = 0.0;
         for (i, widget) in self.widgets.iter().enumerate() {
-            let widget_h = match widget {
-                Widget::SectionHeader { .. } => SECTION_ROW_H,
-                Widget::InfoRow { .. }       => WIDGET_ROW_H * 0.7,
-                _                            => WIDGET_ROW_H,
-            };
+            let widget_h = widget_logical_height(widget, cw, fsz);
             if content_ly >= wy && content_ly < wy + widget_h {
                 return Some(i);
             }
             wy += widget_h;
         }
         None
+    }
+
+    /// Logical y-offset of widget `idx` from the top of the content area.
+    fn widget_top_y(&self, idx: usize) -> f32 {
+        let (cw, fsz) = self.content_metrics();
+        self.widgets.iter().take(idx).map(|w| widget_logical_height(w, cw, fsz)).sum()
     }
 
     fn draw(&mut self) {
@@ -203,7 +289,7 @@ impl SettingsApp {
             } else {
                 self.config.colors.base04.clone()
             };
-            r.draw_text(cat.label(), 14.0 * sf, ry + rh * 0.62, fsz, &text_col);
+            r.draw_text(&cat.label(), 14.0 * sf, ry + rh * 0.62, fsz, &text_col);
         }
 
         // Sidebar right border
@@ -226,7 +312,7 @@ impl SettingsApp {
 
         // Category title
         r.draw_text(
-            self.active_category.label(),
+            &self.active_category.label(),
             cx, cty + 24.0 * sf,
             fsz * 1.2,
             &self.config.colors.base05,
@@ -366,6 +452,45 @@ impl SettingsApp {
                     wy += wh;
                 }
 
+                Widget::Selector { label, options, selected, .. } => {
+                    let wh = selector_total_height(options, cw, fsz);
+                    if wy + wh > content_top && wy < ph as f32 {
+                        r.draw_text(label, cx, wy + fsz * 1.2, fsz, &self.config.colors.base05);
+
+                        let chips_y0 = wy + fsz * 0.4 + fsz * 1.7;
+                        let (rects, chips_h) = selector_chip_rects(options, cw, fsz);
+                        for (i, (rx, ry, rw, rh)) in rects.iter().enumerate() {
+                            let bx = cx + rx;
+                            let by = chips_y0 + ry;
+                            let is_sel = i == *selected;
+                            let (bg, fg, border) = if is_sel {
+                                (&self.config.colors.base0d, &self.config.colors.base00, &self.config.colors.base0d)
+                            } else {
+                                (&self.config.colors.base01, &self.config.colors.base05, &self.config.colors.base03)
+                            };
+                            r.draw_rect(bx, by, *rw, *rh, bg);
+                            r.draw_rect_outline(bx, by, *rw, *rh, border, 1.0 * sf);
+                            let ctw = r.measure_text(&options[i].label, fsz * 0.95);
+                            r.draw_text(&options[i].label,
+                                bx + (*rw - ctw) / 2.0,
+                                by + *rh * 0.66,
+                                fsz * 0.95, fg);
+                        }
+
+                        // Palette preview strip for the selected theme.
+                        if let Some(sw) = options.get(*selected).and_then(|o| o.swatches.as_ref()) {
+                            let strip_y = chips_y0 + chips_h + fsz * 0.4;
+                            let n = sw.len().max(1) as f32;
+                            let sw_w = cw / n;
+                            for (j, hex) in sw.iter().enumerate() {
+                                r.draw_rect(cx + j as f32 * sw_w, strip_y,
+                                    (sw_w - 1.0 * sf).max(1.0), fsz, hex);
+                            }
+                        }
+                    }
+                    wy += wh;
+                }
+
                 Widget::Button { label, .. } => {
                     let wh = WIDGET_ROW_H * sf;
                     if wy + wh > content_top && wy < ph as f32 {
@@ -440,6 +565,33 @@ impl SettingsApp {
         if content_ly < 0.0 { return; }
 
         if let Some(widget_idx) = self.widget_at_y(content_ly) {
+            // Selector chips: map the click to a chip index.
+            if matches!(&self.widgets[widget_idx], Widget::Selector { .. }) {
+                let opts = if let Widget::Selector { options, .. } = &self.widgets[widget_idx] {
+                    options.clone()
+                } else {
+                    unreachable!()
+                };
+                let cx_l  = SIDEBAR_W + CONTENT_PAD;
+                let fsz_l = self.config.font_size.unwrap_or(11.0);
+                let cw_l  = self.width as f32 - cx_l - CONTENT_PAD;
+                let top   = self.widget_top_y(widget_idx);
+                let chips_y0 = fsz_l * 0.4 + fsz_l * 1.7;
+                let rel_x = lx - cx_l;
+                let rel_y = content_ly - top;
+                let (rects, _) = selector_chip_rects(&opts, cw_l, fsz_l);
+                for (i, (rx, ry, rw, rh)) in rects.iter().enumerate() {
+                    if rel_x >= *rx && rel_x <= rx + rw
+                        && rel_y >= chips_y0 + ry && rel_y <= chips_y0 + ry + rh {
+                        let result = apply_selector(&mut self.widgets[widget_idx], i);
+                        self.handle_config_result(result);
+                        self.draw();
+                        break;
+                    }
+                }
+                return;
+            }
+
             let cx      = SIDEBAR_W + CONTENT_PAD;
             let track_x = cx + 140.0;
             let cw      = self.width as f32 - cx - CONTENT_PAD;
@@ -467,7 +619,7 @@ impl SettingsApp {
                     let result = apply_widget_action(&mut self.widgets[widget_idx], 1.0);
                     self.handle_config_result(result);
                 }
-                Widget::InfoRow { .. } | Widget::SectionHeader { .. } => {}
+                Widget::InfoRow { .. } | Widget::SectionHeader { .. } | Widget::Selector { .. } => {}
             }
         }
     }
