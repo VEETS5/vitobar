@@ -84,6 +84,9 @@ struct LauncherApp {
 
     // Mouse hover tracking
     hovered_row: Option<usize>,
+
+    // Coalesce key-repeat-driven redraws into one per event-loop wake.
+    needs_redraw: bool,
 }
 
 impl LauncherApp {
@@ -160,9 +163,14 @@ impl LauncherApp {
         let surface = match self.surface.as_ref() { Some(s) => s, None => return };
 
         let stride = sw as i32 * 4;
-        let (buffer, canvas) = pool
+        // Skip this frame rather than panic if the pool is momentarily exhausted
+        // (e.g. during fast key-repeat scrolling).
+        let (buffer, canvas) = match pool
             .create_buffer(sw as i32, sh_px as i32, stride, wl_shm::Format::Argb8888)
-            .expect("create buffer");
+        {
+            Ok(bc) => bc,
+            Err(_) => return,
+        };
 
         let mut r = Renderer::new(sw, sh_px);
         // Transparent fullscreen background (no fill = stays at 0x00000000)
@@ -300,7 +308,9 @@ impl LauncherApp {
 
         surface.wl_surface().set_buffer_scale(scale as i32);
         surface.wl_surface().damage_buffer(0, 0, sw as i32, sh_px as i32);
-        buffer.attach_to(surface.wl_surface()).expect("buffer attach");
+        if buffer.attach_to(surface.wl_surface()).is_err() {
+            return;
+        }
         surface.commit();
         self.conn.flush().ok();
     }
@@ -643,6 +653,7 @@ fn main() {
         content_x:    0.0,
         content_y:    0.0,
         hovered_row:  None,
+        needs_redraw: false,
     };
 
     let mut event_loop: EventLoop<LauncherApp> = EventLoop::try_new().expect("event loop");
@@ -655,14 +666,14 @@ fn main() {
                     if app.selected > 0 {
                         app.selected -= 1;
                         app.clamp_scroll();
-                        app.draw();
+                        app.needs_redraw = true;
                     }
                 }
                 RepeatAction::Down => {
                     if app.selected + 1 < app.filtered.len() {
                         app.selected += 1;
                         app.clamp_scroll();
-                        app.draw();
+                        app.needs_redraw = true;
                     }
                 }
             }
@@ -674,6 +685,12 @@ fn main() {
         .expect("wayland source");
 
     while app.running {
-        event_loop.dispatch(None, &mut app).expect("dispatch");
+        if event_loop.dispatch(None, &mut app).is_err() {
+            break;
+        }
+        if app.needs_redraw {
+            app.needs_redraw = false;
+            app.draw();
+        }
     }
 }
