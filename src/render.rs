@@ -36,6 +36,18 @@ pub fn get_font() -> &'static Font {
     FONT.get().expect("font not loaded")
 }
 
+/// True if the loaded font has a real glyph for `ch` (index 0 is .notdef).
+/// Used to avoid rendering blank space for missing icon codepoints.
+pub fn glyph_exists(ch: char) -> bool {
+    FONT.get().map(|f| f.lookup_glyph_index(ch) != 0).unwrap_or(false)
+}
+
+/// Total advance width of `text` at `size` px, without needing a Renderer.
+pub fn measure(text: &str, size: f32) -> f32 {
+    let font = get_font();
+    text.chars().map(|ch| font.metrics(ch, size).advance_width).sum()
+}
+
 pub struct Renderer {
     pub pixmap: Pixmap,
 }
@@ -49,6 +61,15 @@ impl Renderer {
 
     pub fn clear(&mut self, hex: &str) {
         let (r, g, b, a) = hex_to_rgba(hex);
+        self.pixmap.fill(Color::from_rgba8(r, g, b, a));
+    }
+
+    /// Fill the whole surface with `hex` at the given `alpha` (0.0–1.0).
+    /// The Wayland Argb8888 buffer keeps the alpha byte, so values below 1.0
+    /// produce a translucent surface composited by the compositor.
+    pub fn clear_rgba(&mut self, hex: &str, alpha: f32) {
+        let (r, g, b, _) = hex_to_rgba(hex);
+        let a = (alpha.clamp(0.0, 1.0) * 255.0).round() as u8;
         self.pixmap.fill(Color::from_rgba8(r, g, b, a));
     }
 

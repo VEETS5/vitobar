@@ -31,12 +31,26 @@ pub enum Widget {
     SectionHeader {
         label: String,
     },
+    Selector {
+        label:    String,
+        options:  Vec<SelectorOption>,
+        selected: usize, // index into options; out-of-range = none highlighted
+        key:      &'static str,
+    },
+}
+
+#[derive(Debug, Clone)]
+pub struct SelectorOption {
+    pub label:    String,
+    pub value:    String,
+    pub swatches: Option<Vec<String>>, // 16 hex colors for theme previews
 }
 
 #[derive(Debug)]
 pub enum WidgetResult {
     None,
     ConfigUpdate { key: &'static str, value: f32 },
+    ConfigUpdateStr { key: &'static str, value: String },
 }
 
 fn read_hostname() -> String {
@@ -237,40 +251,90 @@ fn get_wallpaper_tool() -> &'static str {
 pub fn build_widgets(cat: Category, config: &crate::config::Config) -> Vec<Widget> {
     match cat {
         Category::Appearance => {
-            let bar_h = config.bar_height.unwrap_or(22) as f32;
-            let taskbar_h = config.taskbar_height.unwrap_or(22) as f32;
-            let font_sz = config.font_size.unwrap_or(11.0);
+            let bar_h     = config.bar_h() as f32;
+            let taskbar_h = config.taskbar_h() as f32;
+            let font_sz   = config.font_size.unwrap_or(11.0);
+            let opacity_pct = config.opacity() * 100.0;
+
+            // ── Theme picker ──────────────────────────────────────────────
+            let themes = crate::config::available_themes();
+            let theme_opts: Vec<SelectorOption> = themes.iter().map(|t| SelectorOption {
+                label:    t.name.clone(),
+                value:    t.name.clone(),
+                swatches: Some(t.colors.swatches()),
+            }).collect();
+            let theme_sel = config.selected_theme.as_deref()
+                .and_then(|name| themes.iter().position(|t| t.name == name))
+                .unwrap_or(usize::MAX);
+
+            // ── Density presets (mini/compact/default/comfortable/spacious) ─
+            let densities: &[(&str, u32)] = &[
+                ("Mini", 21), ("Compact", 25), ("Default", 31),
+                ("Comfortable", 37), ("Spacious", 47),
+            ];
+            let density_opts: Vec<SelectorOption> = densities.iter().map(|(label, h)| SelectorOption {
+                label:    (*label).into(),
+                value:    h.to_string(),
+                swatches: None,
+            }).collect();
+            let density_sel = densities.iter()
+                .position(|(_, h)| *h == bar_h as u32)
+                .unwrap_or(usize::MAX);
+
             vec![
+                Widget::SectionHeader { label: "Theme".into() },
+                Widget::Selector {
+                    label:    "Color Scheme".into(),
+                    options:  theme_opts,
+                    selected: theme_sel,
+                    key:      "selected_theme",
+                },
+                Widget::InfoRow {
+                    label: "".into(),
+                    value: "Restart the bar to apply a new theme".into(),
+                },
+
                 Widget::SectionHeader { label: "Bar".into() },
+                Widget::Selector {
+                    label:    "Density".into(),
+                    options:  density_opts,
+                    selected: density_sel,
+                    key:      "bar_density",
+                },
                 Widget::ConfigSlider {
                     label: "Bar Height".into(),
-                    value: (bar_h - 16.0) / 32.0,  // normalize 16..48 to 0..1
+                    value: ((bar_h - 16.0) / 32.0).clamp(0.0, 1.0),  // 16..48
                     min: 16.0,
                     max: 48.0,
                     key: "bar_height",
                 },
                 Widget::ConfigSlider {
                     label: "Taskbar Height".into(),
-                    value: (taskbar_h - 16.0) / 32.0,
+                    value: ((taskbar_h - 16.0) / 32.0).clamp(0.0, 1.0),
                     min: 16.0,
                     max: 48.0,
                     key: "taskbar_height",
                 },
+                Widget::ConfigSlider {
+                    label: "Opacity".into(),
+                    value: ((opacity_pct - 50.0) / 50.0).clamp(0.0, 1.0),  // 50..100
+                    min: 50.0,
+                    max: 100.0,
+                    key: "bar_opacity",
+                },
+
                 Widget::SectionHeader { label: "Typography".into() },
                 Widget::ConfigSlider {
                     label: "Font Size".into(),
-                    value: (font_sz - 8.0) / 12.0,  // normalize 8..20 to 0..1
+                    value: ((font_sz - 8.0) / 12.0).clamp(0.0, 1.0),  // 8..20
                     min: 8.0,
                     max: 20.0,
                     key: "font_size",
                 },
-                Widget::SectionHeader { label: "Theme".into() },
+
+                Widget::SectionHeader { label: "Config".into() },
                 Widget::InfoRow {
-                    label: "Colors".into(),
-                    value: "Managed by Stylix".into(),
-                },
-                Widget::InfoRow {
-                    label: "Config".into(),
+                    label: "File".into(),
                     value: crate::config::config_path().to_string_lossy().to_string(),
                 },
             ]
@@ -549,8 +613,21 @@ pub fn apply_widget_action(widget: &mut Widget, new_value: f32) -> WidgetResult 
             run_cmd(cmd);
             WidgetResult::None
         }
-        Widget::InfoRow { .. } | Widget::SectionHeader { .. } => WidgetResult::None,
+        Widget::InfoRow { .. } | Widget::SectionHeader { .. } | Widget::Selector { .. } => {
+            WidgetResult::None
+        }
     }
+}
+
+/// Select option `idx` of a Selector widget, returning the new string value.
+pub fn apply_selector(widget: &mut Widget, idx: usize) -> WidgetResult {
+    if let Widget::Selector { options, selected, key, .. } = widget {
+        if idx < options.len() {
+            *selected = idx;
+            return WidgetResult::ConfigUpdateStr { key, value: options[idx].value.clone() };
+        }
+    }
+    WidgetResult::None
 }
 
 fn run_cmd(cmd: &str) {
