@@ -9,6 +9,7 @@ use modules::{
     sysinfo::{SysMonitor, SysStats},
     bluetooth::BluetoothStatus,
     tray::{self, TrayState, TrayDirty, TrayItem},
+    widgets::{self, WidgetData, CavaHandle},
 };
 use std::sync::atomic::Ordering;
 use render::Renderer;
@@ -50,6 +51,7 @@ enum BarAction {
     FocusWorkspace { id: u64 },
     FocusWindow    { id: u64 },
     Spawn          { cmd: String },
+    SpawnSh        { cmd: String }, // run via `sh -c` (supports args/pipes)
     // Right-click context menu actions
     CloseWindow    { id: u64 },
     MaximizeColumn,
@@ -92,6 +94,9 @@ fn fire_action(action: BarAction) {
         }
         BarAction::Spawn { cmd } => {
             std::process::Command::new(&cmd).spawn().ok();
+        }
+        BarAction::SpawnSh { cmd } => {
+            std::process::Command::new("sh").args(["-c", &cmd]).spawn().ok();
         }
         BarAction::CloseWindow { id } => {
             std::thread::spawn(move || {
@@ -245,6 +250,15 @@ struct VitoBar {
     tray_menu_tx:    calloop::channel::Sender<(usize, Vec<tray::MenuItem>)>,
     pending_tray_popup: Option<(TrayItem, usize, f32)>, // (item, output_idx, menu_x)
     last_time_string:  String,
+
+    widget_data:       WidgetData,
+    cava:              Option<CavaHandle>,
+    last_config_mtime: Option<std::time::SystemTime>,
+}
+
+/// mtime of config.toml, for live-reload change detection.
+fn config_mtime() -> Option<std::time::SystemTime> {
+    std::fs::metadata(config::config_path()).and_then(|m| m.modified()).ok()
 }
 
 fn sort_windows_by_position(windows: &mut Vec<niri_ipc::Window>, ws_map: &HashMap<u64, u8>) {
@@ -266,6 +280,7 @@ fn draw_top_on(
     conn: &Connection,
     shm: &Shm,
     tray_items: &[TrayItem],
+    widget_data: &WidgetData,
 ) {
     let width  = out.width;
     let height = config.bar_h();
@@ -378,6 +393,105 @@ fn draw_top_on(
         x: cx_log + 2.0, y: 2.0, w: 22.0, h: bh_log,
         action: BarAction::Spawn { cmd: "vitosettings".into() },
     });
+
+    // ── Left-of-center widgets (grow leftward from the launcher) ─────────
+    {
+        let media     = widget_data.media.lock().map(|g| g.clone()).unwrap_or_default();
+        let weather   = widget_data.weather.lock().ok().and_then(|g| g.clone());
+        let cava_bars = widget_data.cava.lock().map(|g| g.clone()).unwrap_or_default();
+        let net_up    = widget_data.net.up;
+        let net_down  = widget_data.net.down;
+
+        let ws_end = x;          // right edge of the last workspace square
+        let wgap   = 4.0 * sf;
+        let mut wx = lx - config.widget_left_pad() * sf;
+
+        // icon (may be "") + text block growing leftward; skipped if it would
+        // collide with the workspaces.
+        macro_rules! lwidget {
+            ($icon:expr, $text:expr, $color:expr, $action:expr) => {{
+                let icon_s: &str = $icon;
+                let text_s: &str = $text;
+                let iw = if icon_s.is_empty() { 0.0 } else { r.measure_text(icon_s, icon_fsz) };
+                let tw = r.measure_text(text_s, fsz);
+                let bw = iw + (if iw > 0.0 { 4.0 * sf } else { 0.0 }) + tw + 10.0 * sf;
+                if wx - bw >= ws_end + 4.0 * sf {
+                    wx -= bw;
+                    r.draw_rect(wx, pad, bw, bh, &config.colors.base01);
+                    r.draw_rect_outline(wx, pad, bw, bh, &config.colors.base02, 1.5 * sf);
+                    let mut tx = wx + 5.0 * sf;
+                    if iw > 0.0 {
+                        r.draw_text(icon_s, tx, icon_base, icon_fsz, $color);
+                        tx += iw + 4.0 * sf;
+                    }
+                    r.draw_text(text_s, tx, text_y, fsz, $color);
+                    hits.push(HitRegion { x: wx / sf, y: 2.0, w: bw / sf, h: bh_log, action: $action });
+                    wx -= wgap;
+                }
+            }};
+        }
+
+        // Now Playing (nearest the launcher)
+        if config.widget_media_enabled() && media.present && !media.title.is_empty() {
+            let icon = if media.playing { "\u{f04c}" } else { "\u{f04b}" };
+            let full = if media.artist.is_empty() {
+                media.title.clone()
+            } else {
+                format!("{} \u{2014} {}", media.title, media.artist)
+            };
+            let shown = r.truncate_text(&full, 200.0 * sf, fsz);
+            let col = if media.playing { &config.colors.base0b } else { &config.colors.base04 };
+            lwidget!(icon, &shown, col,
+                BarAction::SpawnSh { cmd: "playerctl play-pause".into() });
+        }
+
+        // Equalizer (cava spectrum)
+        if config.widget_equalizer_enabled() && !cava_bars.is_empty() {
+            let nb      = cava_bars.len();
+            let bar_w   = 3.0 * sf;
+            let bar_gap = 1.0 * sf;
+            let eq_w    = nb as f32 * (bar_w + bar_gap) + 8.0 * sf;
+            if wx - eq_w >= ws_end + 4.0 * sf {
+                wx -= eq_w;
+                r.draw_rect(wx, pad, eq_w, bh, &config.colors.base01);
+                r.draw_rect_outline(wx, pad, eq_w, bh, &config.colors.base02, 1.5 * sf);
+                let max_h  = bh - 4.0 * sf;
+                let base_y = pad + bh - 2.0 * sf;
+                let mut bx = wx + 4.0 * sf;
+                for &v in &cava_bars {
+                    let hgt = (v as f32 / 255.0) * max_h;
+                    r.draw_rect(bx, base_y - hgt, bar_w, hgt.max(1.0), &config.colors.base0d);
+                    bx += bar_w + bar_gap;
+                }
+                hits.push(HitRegion {
+                    x: wx / sf, y: 2.0, w: eq_w / sf, h: bh_log,
+                    action: BarAction::Spawn { cmd: "vitosettings".into() },
+                });
+                wx -= wgap;
+            }
+        }
+
+        // Weather
+        if config.widget_weather_enabled() {
+            if let Some(w) = &weather {
+                let cands = widgets::weather_candidates(w.code);
+                let ch = cands.iter().copied().find(|&c| render::glyph_exists(c))
+                    .unwrap_or(*cands.last().unwrap());
+                let wicon = ch.to_string();
+                let txt = format!("{}\u{00b0}/{}\u{00b0}", w.hi, w.lo);
+                lwidget!(&wicon, &txt, &config.colors.base0a,
+                    BarAction::Spawn { cmd: "vitosettings".into() });
+            }
+        }
+
+        // Network throughput
+        if config.widget_netspeed_enabled() {
+            let txt = format!("\u{2193}{} \u{2191}{}",
+                widgets::fmt_rate(net_down), widgets::fmt_rate(net_up));
+            lwidget!("", &txt, &config.colors.base0c,
+                BarAction::Spawn { cmd: "vitosettings".into() });
+        }
+    }
 
     // ── Status blocks (right-to-left) ───────────────────────────────────
     let time  = get_time_string();
@@ -677,11 +791,11 @@ impl VitoBar {
         self.refresh_tray_cache();
         let VitoBar {
             ref mut outputs, ref config, ref niri_state, ref stats,
-            ref windows_ordered, ref conn, ref shm, ref tray_cached, ..
+            ref windows_ordered, ref conn, ref shm, ref tray_cached, ref widget_data, ..
         } = *self;
         for out in outputs.iter_mut() {
             if out.top_configured {
-                draw_top_on(out, config, niri_state, stats, windows_ordered, conn, shm, tray_cached);
+                draw_top_on(out, config, niri_state, stats, windows_ordered, conn, shm, tray_cached, widget_data);
             }
         }
     }
@@ -702,12 +816,86 @@ impl VitoBar {
         self.refresh_tray_cache();
         let VitoBar {
             ref mut outputs, ref config, ref niri_state, ref stats,
-            ref windows_ordered, ref conn, ref shm, ref tray_cached, ..
+            ref windows_ordered, ref conn, ref shm, ref tray_cached, ref widget_data, ..
         } = *self;
         if let Some(out) = outputs.get_mut(idx) {
             if out.top_configured {
-                draw_top_on(out, config, niri_state, stats, windows_ordered, conn, shm, tray_cached);
+                draw_top_on(out, config, niri_state, stats, windows_ordered, conn, shm, tray_cached, widget_data);
             }
+        }
+    }
+
+    fn start_cava(&mut self) {
+        self.stop_cava();
+        self.cava = widgets::start_cava(12, self.widget_data.cava.clone());
+    }
+
+    fn stop_cava(&mut self) {
+        if let Some(h) = self.cava.take() {
+            h.stop();
+        }
+        if let Ok(mut g) = self.widget_data.cava.lock() {
+            g.clear();
+        }
+    }
+
+    /// Re-apply layer-surface sizes/exclusive-zones (used when bar height
+    /// changes live).
+    fn reapply_layer_sizes(&mut self) {
+        let bh = self.config.bar_h();
+        let th = self.config.taskbar_h();
+        for out in &self.outputs {
+            if let Some(s) = &out.top_surface {
+                s.set_size(0, bh);
+                s.set_exclusive_zone(bh as i32);
+                s.commit();
+            }
+            if let Some(s) = &out.bot_surface {
+                s.set_size(0, th);
+                s.set_exclusive_zone(th as i32);
+                s.commit();
+            }
+        }
+    }
+
+    /// Returns true if config.toml changed on disk since last check.
+    fn config_changed(&mut self) -> bool {
+        let now = config_mtime();
+        if now != self.last_config_mtime {
+            self.last_config_mtime = now;
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Reload config from disk and apply side effects (cava start/stop, weather
+    /// thread inputs, layer sizes).
+    fn reload_config(&mut self) {
+        let new = Config::load();
+        let eq_was = self.config.widget_equalizer_enabled();
+        let h_was  = (self.config.bar_h(), self.config.taskbar_h());
+
+        if new.weather_location() != self.config.weather_location()
+            || new.weather_units() != self.config.weather_units()
+        {
+            if let Ok(mut g) = self.widget_data.weather_loc.lock() {
+                *g = new.weather_location().to_string();
+            }
+            if let Ok(mut g) = self.widget_data.weather_units.lock() {
+                *g = new.weather_units().to_string();
+            }
+            self.widget_data.weather_refetch.store(true, Ordering::Release);
+        }
+
+        self.config = new;
+
+        let eq_now = self.config.widget_equalizer_enabled();
+        if eq_now != eq_was {
+            if eq_now { self.start_cava(); } else { self.stop_cava(); }
+        }
+        if (self.config.bar_h(), self.config.taskbar_h()) != h_was {
+            self.reapply_layer_sizes();
         }
     }
 
@@ -1450,6 +1638,10 @@ fn main() {
     let mut monitor = SysMonitor::new();
     let initial_stats = monitor.refresh();
 
+    // Background data sources for the optional bar widgets.
+    let widget_data = WidgetData::new(config.weather_location(), config.weather_units());
+    widget_data.start_background();
+
     let conn = Connection::connect_to_env().expect("failed to connect to Wayland");
     let (globals, queue) = registry_queue_init::<VitoBar>(&conn).expect("failed to init registry");
     let qh = queue.handle();
@@ -1511,7 +1703,15 @@ fn main() {
         tray_menu_tx,
         pending_tray_popup: None,
         last_time_string: String::new(),
+        widget_data,
+        cava: None,
+        last_config_mtime: config_mtime(),
     };
+
+    // Start the cava spectrum reader if the equalizer widget is enabled.
+    if app.config.widget_equalizer_enabled() {
+        app.start_cava();
+    }
 
     // ── Event loop ──────────────────────────────────────────────────────
     let mut event_loop: EventLoop<VitoBar> = EventLoop::try_new().expect("event loop");
@@ -1677,6 +1877,47 @@ fn main() {
             },
         )
         .expect("background apps timer");
+
+    // ── Widget tick + live config-watch: every 1s ─────────────────────────
+    event_loop.handle()
+        .insert_source(
+            Timer::from_duration(Duration::from_secs(1)),
+            |_, _, app: &mut VitoBar| {
+                app.widget_data.net.sample();
+                let mut need = false;
+
+                let media_dirty = app.widget_data.media_dirty.swap(false, Ordering::Acquire);
+                let weather_dirty = app.widget_data.weather_dirty.swap(false, Ordering::Acquire);
+                if media_dirty && app.config.widget_media_enabled()   { need = true; }
+                if weather_dirty && app.config.widget_weather_enabled() { need = true; }
+                if app.config.widget_netspeed_enabled() { need = true; }
+
+                if app.config_changed() {
+                    app.reload_config();
+                    need = true;
+                }
+                if need {
+                    app.redraw_all_tops();
+                }
+                TimeoutAction::ToDuration(Duration::from_secs(1))
+            },
+        )
+        .expect("widget timer");
+
+    // ── Cava animation: self-paced (~12fps while the equalizer is on) ─────
+    event_loop.handle()
+        .insert_source(
+            Timer::from_duration(Duration::from_millis(500)),
+            |_, _, app: &mut VitoBar| {
+                if app.config.widget_equalizer_enabled() && app.cava.is_some() {
+                    app.redraw_all_tops();
+                    TimeoutAction::ToDuration(Duration::from_millis(80))
+                } else {
+                    TimeoutAction::ToDuration(Duration::from_millis(500))
+                }
+            },
+        )
+        .expect("cava timer");
 
     while app.running {
         event_loop.dispatch(None, &mut app).expect("dispatch failed");
