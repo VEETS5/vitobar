@@ -270,10 +270,13 @@ pub fn start_cava(bars: usize, out: Shared<Vec<u8>>) -> Option<CavaHandle> {
     if !command_exists("cava") {
         return None;
     }
-    // Reap any cava orphaned by a previous bar run (matched by our config path,
-    // so a user's own cava instance is left untouched).
-    let _ = Command::new("pkill").args(["-f", "vitobar-cava.conf"]).status();
-    let cfg_path = std::env::temp_dir().join("vitobar-cava.conf");
+    // Instance-scoped config path (includes our PID) so concurrent bars — e.g.
+    // one process per monitor — don't share a file or reap each other's cava.
+    // Crash recovery is handled by SIGPIPE (cava dies when our read end closes),
+    // so this pkill only ever targets a cava left by THIS process.
+    let cfg_name = format!("vitobar-cava.{}.conf", std::process::id());
+    let _ = Command::new("pkill").args(["-f", &cfg_name]).status();
+    let cfg_path = std::env::temp_dir().join(&cfg_name);
     let cfg = format!(
         "[general]\nbars = {bars}\nframerate = 30\n\n\
          [output]\nmethod = raw\nraw_target = /dev/stdout\n\
