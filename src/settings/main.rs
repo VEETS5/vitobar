@@ -128,6 +128,19 @@ impl SettingsApp {
         self.hovered_widget = None;
     }
 
+    /// (Re)launch swayidle for the current idle config, or stop it if all
+    /// timeouts are disabled.
+    fn apply_idle(&self) {
+        match self.config.idle_command() {
+            Some(cmd) => {
+                std::process::Command::new("sh").args(["-c", &cmd]).spawn().ok();
+            }
+            None => {
+                std::process::Command::new("pkill").arg("swayidle").spawn().ok();
+            }
+        }
+    }
+
     fn handle_config_result(&mut self, result: WidgetResult) {
         match result {
             WidgetResult::ConfigUpdate { key, value } => {
@@ -206,6 +219,30 @@ impl SettingsApp {
                     "power_profile" => {
                         let _ = std::process::Command::new("powerprofilesctl")
                             .args(["set", &value]).status();
+                    }
+                    "idle_display_off" => {
+                        let v = value.parse::<u32>().unwrap_or(0);
+                        self.config.idle_display_off = Some(v);
+                        save_setting("idle_display_off", toml::Value::Integer(v as i64));
+                        self.apply_idle();
+                    }
+                    "idle_suspend" => {
+                        let v = value.parse::<u32>().unwrap_or(0);
+                        self.config.idle_suspend = Some(v);
+                        save_setting("idle_suspend", toml::Value::Integer(v as i64));
+                        self.apply_idle();
+                    }
+                    "idle_hibernate" => {
+                        let v = value.parse::<u32>().unwrap_or(0);
+                        self.config.idle_hibernate = Some(v);
+                        save_setting("idle_hibernate", toml::Value::Integer(v as i64));
+                        self.apply_idle();
+                    }
+                    "idle_poweroff" => {
+                        let v = value.parse::<u32>().unwrap_or(0);
+                        self.config.idle_poweroff = Some(v);
+                        save_setting("idle_poweroff", toml::Value::Integer(v as i64));
+                        self.apply_idle();
                     }
                     _ => {}
                 }
