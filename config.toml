@@ -1,4 +1,8 @@
 bar_height = 21
 bar_opacity = 0.7008415460586548
 font_size = 11.0
+nightlight_end = 7
+nightlight_mode = "scheduled"
+nightlight_start = 19
+nightlight_temp = 3091
 taskbar_height = 21
