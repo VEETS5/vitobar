@@ -1439,6 +1439,14 @@ fn main() {
     log::info!("font loaded from: {}", font_path);
 
     let config  = Config::load();
+
+    // Start the idle daemon (display-off / suspend / hibernate / power-off) for
+    // the configured timeouts. The command kills any prior swayidle first.
+    if let Some(cmd) = config.idle_command() {
+        log::info!("applying idle timeouts via swayidle");
+        std::process::Command::new("sh").args(["-c", &cmd]).spawn().ok();
+    }
+
     let mut monitor = SysMonitor::new();
     let initial_stats = monitor.refresh();
 
