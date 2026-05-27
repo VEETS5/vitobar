@@ -53,6 +53,13 @@ pub struct Config {
     pub idle_suspend:     Option<u32>,
     pub idle_hibernate:   Option<u32>,
     pub idle_poweroff:    Option<u32>,
+    pub widget_media_enabled:     Option<bool>,
+    pub widget_equalizer_enabled: Option<bool>,
+    pub widget_weather_enabled:   Option<bool>,
+    pub widget_netspeed_enabled:  Option<bool>,
+    pub widget_left_pad:  Option<f32>,
+    pub weather_location: Option<String>,
+    pub weather_units:    Option<String>,
 }
 
 impl Config {
@@ -69,6 +76,14 @@ impl Config {
     pub fn idle_suspend(&self)     -> u32 { self.idle_suspend.unwrap_or(0) }
     pub fn idle_hibernate(&self)   -> u32 { self.idle_hibernate.unwrap_or(0) }
     pub fn idle_poweroff(&self)    -> u32 { self.idle_poweroff.unwrap_or(0) }
+
+    pub fn widget_media_enabled(&self)     -> bool { self.widget_media_enabled.unwrap_or(false) }
+    pub fn widget_equalizer_enabled(&self) -> bool { self.widget_equalizer_enabled.unwrap_or(false) }
+    pub fn widget_weather_enabled(&self)   -> bool { self.widget_weather_enabled.unwrap_or(false) }
+    pub fn widget_netspeed_enabled(&self)  -> bool { self.widget_netspeed_enabled.unwrap_or(false) }
+    pub fn widget_left_pad(&self)  -> f32  { self.widget_left_pad.unwrap_or(12.0).clamp(0.0, 400.0) }
+    pub fn weather_location(&self) -> &str { self.weather_location.as_deref().unwrap_or("") }
+    pub fn weather_units(&self)    -> &str { self.weather_units.as_deref().unwrap_or("C") }
 
     /// Build the `swayidle` invocation for the configured idle timeouts (each
     /// in minutes; 0 = disabled). Returns None when nothing is enabled. Kills
@@ -118,6 +133,13 @@ struct TomlSettings {
     idle_suspend:     Option<u32>,
     idle_hibernate:   Option<u32>,
     idle_poweroff:    Option<u32>,
+    widget_media_enabled:     Option<bool>,
+    widget_equalizer_enabled: Option<bool>,
+    widget_weather_enabled:   Option<bool>,
+    widget_netspeed_enabled:  Option<bool>,
+    widget_left_pad:  Option<f32>,
+    weather_location: Option<String>,
+    weather_units:    Option<String>,
 }
 
 /// A named base16 color scheme selectable in the Appearance tab.
@@ -285,6 +307,13 @@ impl Config {
             idle_suspend:     ts.idle_suspend,
             idle_hibernate:   ts.idle_hibernate,
             idle_poweroff:    ts.idle_poweroff,
+            widget_media_enabled:     ts.widget_media_enabled,
+            widget_equalizer_enabled: ts.widget_equalizer_enabled,
+            widget_weather_enabled:   ts.widget_weather_enabled,
+            widget_netspeed_enabled:  ts.widget_netspeed_enabled,
+            widget_left_pad:  ts.widget_left_pad,
+            weather_location: ts.weather_location.clone(),
+            weather_units:    ts.weather_units.clone(),
         }
     }
 }
@@ -326,6 +355,13 @@ impl Default for Config {
             idle_suspend:     None,
             idle_hibernate:   None,
             idle_poweroff:    None,
+            widget_media_enabled:     None,
+            widget_equalizer_enabled: None,
+            widget_weather_enabled:   None,
+            widget_netspeed_enabled:  None,
+            widget_left_pad:  None,
+            weather_location: None,
+            weather_units:    None,
         }
     }
 }
@@ -355,7 +391,19 @@ pub fn save_setting(key: &str, value: toml::Value) {
         let _ = fs::create_dir_all(parent);
     }
     if let Ok(s) = toml::to_string_pretty(&val) {
-        let _ = fs::write(path, s);
+        write_atomic(&path, &s);
+    }
+}
+
+/// Write `contents` to `path` atomically (temp file in the same directory +
+/// rename), so a concurrent reader (the bar's live config-watch) never sees a
+/// half-written file.
+fn write_atomic(path: &std::path::Path, contents: &str) {
+    let tmp = path.with_extension(format!("toml.tmp.{}", std::process::id()));
+    if fs::write(&tmp, contents).is_ok() {
+        if fs::rename(&tmp, path).is_err() {
+            let _ = fs::remove_file(&tmp);
+        }
     }
 }
 
@@ -374,7 +422,7 @@ pub fn remove_setting(key: &str) {
         table.remove(key);
     }
     if let Ok(s) = toml::to_string_pretty(&val) {
-        let _ = fs::write(path, s);
+        write_atomic(&path, &s);
     }
 }
 

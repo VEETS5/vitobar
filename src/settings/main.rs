@@ -116,6 +116,7 @@ struct SettingsApp {
     widgets:         Vec<Widget>,
     scroll_offset:   f32,
     hovered_widget:  Option<usize>,
+    focused_widget:  Option<usize>, // index of a focused TextInput
     max_scroll:      f32,
     draw_pending:    bool,
 }
@@ -126,6 +127,7 @@ impl SettingsApp {
         self.widgets = build_widgets(cat, &self.config);
         self.scroll_offset = 0.0;
         self.hovered_widget = None;
+        self.focused_widget = None;
     }
 
     /// (Re)launch swayidle for the current idle config, or stop it if all
@@ -244,9 +246,28 @@ impl SettingsApp {
                         save_setting("idle_poweroff", toml::Value::Integer(v as i64));
                         self.apply_idle();
                     }
+                    "weather_location" => {
+                        self.config.weather_location = Some(value.clone());
+                        save_setting("weather_location", toml::Value::String(value.clone()));
+                    }
+                    "weather_units" => {
+                        self.config.weather_units = Some(value.clone());
+                        save_setting("weather_units", toml::Value::String(value.clone()));
+                    }
                     _ => {}
                 }
                 // Rebuild so selectors/sliders reflect the new values.
+                self.widgets = build_widgets(self.active_category, &self.config);
+            }
+            WidgetResult::ConfigUpdateBool { key, value } => {
+                match key {
+                    "widget_media_enabled"     => self.config.widget_media_enabled = Some(value),
+                    "widget_equalizer_enabled" => self.config.widget_equalizer_enabled = Some(value),
+                    "widget_weather_enabled"   => self.config.widget_weather_enabled = Some(value),
+                    "widget_netspeed_enabled"  => self.config.widget_netspeed_enabled = Some(value),
+                    _ => {}
+                }
+                save_setting(key, toml::Value::Boolean(value));
                 self.widgets = build_widgets(self.active_category, &self.config);
             }
             WidgetResult::None => {}
@@ -460,7 +481,8 @@ impl SettingsApp {
                     wy += wh;
                 }
 
-                Widget::Toggle { label, value, .. } => {
+                Widget::Toggle { label, value, .. }
+                | Widget::ConfigToggle { label, value, .. } => {
                     let wh = WIDGET_ROW_H * sf;
                     if wy + wh > content_top && wy < ph as f32 {
                         if is_hovered {
@@ -519,6 +541,38 @@ impl SettingsApp {
                         let clipped = r.clip_text(value, avail, fsz);
                         r.draw_text(&clipped, cx + 110.0 * sf, wy + fsz * 1.1, fsz,
                             &self.config.colors.base05);
+                    }
+                    wy += wh;
+                }
+
+                Widget::TextInput { label, value, .. } => {
+                    let wh = WIDGET_ROW_H * sf;
+                    if wy + wh > content_top && wy < ph as f32 {
+                        if is_hovered {
+                            r.draw_rect(cx - 4.0 * sf, wy, cw + 8.0 * sf, wh,
+                                &self.config.colors.base01);
+                        }
+                        r.draw_text(label, cx, wy + fsz * 1.3, fsz,
+                            &self.config.colors.base05);
+
+                        let field_x = cx + 140.0 * sf;
+                        let field_w = (cw - 140.0 * sf - 8.0 * sf).max(40.0 * sf);
+                        let field_h = 26.0 * sf;
+                        let field_y = wy + wh * 0.5 - field_h * 0.5;
+                        let focused = self.focused_widget == Some(wi);
+                        let border = if focused {
+                            &self.config.colors.base0d
+                        } else {
+                            &self.config.colors.base03
+                        };
+                        r.draw_rect(field_x, field_y, field_w, field_h, &self.config.colors.base00);
+                        r.draw_rect_outline(field_x, field_y, field_w, field_h, border, 1.0 * sf);
+
+                        let mut shown = value.clone();
+                        if focused { shown.push('\u{258f}'); }
+                        let clipped = r.clip_text(&shown, field_w - 12.0 * sf, fsz);
+                        r.draw_text(&clipped, field_x + 6.0 * sf, field_y + field_h * 0.68,
+                            fsz, &self.config.colors.base05);
                     }
                     wy += wh;
                 }
@@ -635,6 +689,10 @@ impl SettingsApp {
         let content_ly = ly - content_top + self.scroll_offset;
         if content_ly < 0.0 { return; }
 
+        // Any content click defocuses the text field unless it re-focuses below.
+        let prev_focus = self.focused_widget;
+        self.focused_widget = None;
+
         if let Some(widget_idx) = self.widget_at_y(content_ly) {
             // Selector chips: map the click to a chip index.
             if matches!(&self.widgets[widget_idx], Widget::Selector { .. }) {
@@ -678,9 +736,9 @@ impl SettingsApp {
                     }
                     self.drag_widget = Some(widget_idx);
                 }
-                Widget::Toggle { .. } => {
+                Widget::Toggle { .. } | Widget::ConfigToggle { .. } => {
                     let current = matches!(&self.widgets[widget_idx],
-                        Widget::Toggle { value: true, .. });
+                        Widget::Toggle { value: true, .. } | Widget::ConfigToggle { value: true, .. });
                     let result = apply_widget_action(&mut self.widgets[widget_idx],
                         if current { 0.0 } else { 1.0 });
                     self.handle_config_result(result);
@@ -690,8 +748,17 @@ impl SettingsApp {
                     let result = apply_widget_action(&mut self.widgets[widget_idx], 1.0);
                     self.handle_config_result(result);
                 }
+                Widget::TextInput { .. } => {
+                    self.focused_widget = Some(widget_idx);
+                    self.draw();
+                }
                 Widget::InfoRow { .. } | Widget::SectionHeader { .. } | Widget::Selector { .. } => {}
             }
+        }
+
+        // Reflect a focus change (e.g. clicking away from the field).
+        if prev_focus != self.focused_widget {
+            self.draw();
         }
     }
 }
@@ -794,6 +861,46 @@ impl KeyboardHandler for SettingsApp {
 
     fn press_key(&mut self, _: &Connection, _: &QueueHandle<Self>,
                  _: &wl_keyboard::WlKeyboard, _: u32, event: KeyEvent) {
+        // Text-field editing takes precedence while a field is focused.
+        if let Some(idx) = self.focused_widget {
+            match event.keysym {
+                Keysym::Escape => {
+                    self.focused_widget = None; // cancel
+                    self.draw();
+                }
+                Keysym::Return | Keysym::KP_Enter => {
+                    let committed = if let Some(Widget::TextInput { value, key, .. }) = self.widgets.get(idx) {
+                        Some((*key, value.clone()))
+                    } else {
+                        None
+                    };
+                    self.focused_widget = None;
+                    if let Some((key, value)) = committed {
+                        self.handle_config_result(WidgetResult::ConfigUpdateStr { key, value });
+                    }
+                    self.draw();
+                }
+                Keysym::BackSpace => {
+                    if let Some(Widget::TextInput { value, .. }) = self.widgets.get_mut(idx) {
+                        value.pop();
+                    }
+                    self.draw();
+                }
+                _ => {
+                    if let Some(s) = event.utf8 {
+                        let typed: String = s.chars().filter(|c| !c.is_control()).collect();
+                        if !typed.is_empty() {
+                            if let Some(Widget::TextInput { value, .. }) = self.widgets.get_mut(idx) {
+                                value.push_str(&typed);
+                            }
+                            self.draw();
+                        }
+                    }
+                }
+            }
+            return;
+        }
+
         match event.keysym {
             Keysym::Escape => {
                 self.running = false;
@@ -954,6 +1061,7 @@ fn main() {
         widgets:         initial_widgets,
         scroll_offset:   0.0,
         hovered_widget:  None,
+        focused_widget:  None,
         max_scroll:      0.0,
         draw_pending:    false,
     };

@@ -37,6 +37,18 @@ pub enum Widget {
         selected: usize, // index into options; out-of-range = none highlighted
         key:      &'static str,
     },
+    // Toggle that persists a boolean to config.toml (vs. running a command).
+    ConfigToggle {
+        label: String,
+        value: bool,
+        key:   &'static str,
+    },
+    // Free-text entry persisted to config.toml on edit.
+    TextInput {
+        label: String,
+        value: String,
+        key:   &'static str,
+    },
 }
 
 #[derive(Debug, Clone)]
@@ -51,6 +63,7 @@ pub enum WidgetResult {
     None,
     ConfigUpdate { key: &'static str, value: f32 },
     ConfigUpdateStr { key: &'static str, value: String },
+    ConfigUpdateBool { key: &'static str, value: bool },
 }
 
 fn read_hostname() -> String {
@@ -632,6 +645,69 @@ pub fn build_widgets(cat: Category, config: &crate::config::Config) -> Vec<Widge
             ]
         }
 
+        Category::Widgets => {
+            let units_sel = if config.weather_units().eq_ignore_ascii_case("F") { 1 } else { 0 };
+            let mut widgets = vec![
+                Widget::SectionHeader { label: "Bar Widgets".into() },
+                Widget::ConfigToggle {
+                    label: "Now Playing".into(),
+                    value: config.widget_media_enabled(),
+                    key:   "widget_media_enabled",
+                },
+                Widget::ConfigToggle {
+                    label: "Equalizer".into(),
+                    value: config.widget_equalizer_enabled(),
+                    key:   "widget_equalizer_enabled",
+                },
+                Widget::ConfigToggle {
+                    label: "Weather".into(),
+                    value: config.widget_weather_enabled(),
+                    key:   "widget_weather_enabled",
+                },
+                Widget::ConfigToggle {
+                    label: "Network speed".into(),
+                    value: config.widget_netspeed_enabled(),
+                    key:   "widget_netspeed_enabled",
+                },
+            ];
+
+            // Hints for missing dependencies.
+            let mut missing: Vec<&str> = Vec::new();
+            if !command_exists("playerctl") { missing.push("playerctl"); }
+            if !command_exists("cava")      { missing.push("cava"); }
+            if !command_exists("curl")      { missing.push("curl"); }
+            if !missing.is_empty() {
+                widgets.push(Widget::InfoRow {
+                    label: "".into(),
+                    value: format!("Install for full support: {}", missing.join(", ")),
+                });
+            }
+
+            widgets.push(Widget::SectionHeader { label: "Layout".into() });
+            widgets.push(Widget::ConfigSlider {
+                label: "Left padding (px)".into(),
+                value: (config.widget_left_pad() / 200.0).clamp(0.0, 1.0),
+                min: 0.0, max: 200.0, key: "widget_left_pad",
+            });
+
+            widgets.push(Widget::SectionHeader { label: "Weather".into() });
+            widgets.push(Widget::TextInput {
+                label: "Location".into(),
+                value: config.weather_location().to_string(),
+                key:   "weather_location",
+            });
+            widgets.push(Widget::Selector {
+                label:    "Units".into(),
+                options:  vec![
+                    SelectorOption { label: "Celsius".into(),    value: "C".into(), swatches: None },
+                    SelectorOption { label: "Fahrenheit".into(), value: "F".into(), swatches: None },
+                ],
+                selected: units_sel,
+                key:      "weather_units",
+            });
+            widgets
+        }
+
         Category::Power => {
             let mut widgets = vec![];
 
@@ -719,9 +795,14 @@ pub fn apply_widget_action(widget: &mut Widget, new_value: f32) -> WidgetResult 
             run_cmd(cmd);
             WidgetResult::None
         }
-        Widget::InfoRow { .. } | Widget::SectionHeader { .. } | Widget::Selector { .. } => {
-            WidgetResult::None
+        Widget::ConfigToggle { value, key, .. } => {
+            *value = new_value > 0.5;
+            WidgetResult::ConfigUpdateBool { key, value: *value }
         }
+        Widget::InfoRow { .. }
+        | Widget::SectionHeader { .. }
+        | Widget::Selector { .. }
+        | Widget::TextInput { .. } => WidgetResult::None,
     }
 }
 

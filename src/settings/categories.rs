@@ -7,6 +7,7 @@ pub enum Category {
     Audio,
     Network,
     Bluetooth,
+    Widgets,
     Power,
     System,
 }
@@ -18,6 +19,7 @@ impl Category {
         Category::Audio,
         Category::Network,
         Category::Bluetooth,
+        Category::Widgets,
         Category::Power,
         Category::System,
     ];
@@ -29,6 +31,7 @@ impl Category {
             Category::Audio      => "Audio",
             Category::Network    => "Network",
             Category::Bluetooth  => "Bluetooth",
+            Category::Widgets    => "Widgets",
             Category::Power      => "Power",
             Category::System     => "About",
         }
@@ -45,6 +48,7 @@ impl Category {
             Category::Audio      => &['\u{f028}'],
             Category::Network    => &['\u{f1eb}'],
             Category::Bluetooth  => &['\u{f294}'],
+            Category::Widgets    => &['\u{f009}', '\u{f0e8}'],
             Category::Power      => &['\u{f011}'],
             Category::System     => &['\u{f05a}', '\u{f129}'],
         }
