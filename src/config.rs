@@ -391,7 +391,19 @@ pub fn save_setting(key: &str, value: toml::Value) {
         let _ = fs::create_dir_all(parent);
     }
     if let Ok(s) = toml::to_string_pretty(&val) {
-        let _ = fs::write(path, s);
+        write_atomic(&path, &s);
+    }
+}
+
+/// Write `contents` to `path` atomically (temp file in the same directory +
+/// rename), so a concurrent reader (the bar's live config-watch) never sees a
+/// half-written file.
+fn write_atomic(path: &std::path::Path, contents: &str) {
+    let tmp = path.with_extension(format!("toml.tmp.{}", std::process::id()));
+    if fs::write(&tmp, contents).is_ok() {
+        if fs::rename(&tmp, path).is_err() {
+            let _ = fs::remove_file(&tmp);
+        }
     }
 }
 
@@ -410,7 +422,7 @@ pub fn remove_setting(key: &str) {
         table.remove(key);
     }
     if let Ok(s) = toml::to_string_pretty(&val) {
-        let _ = fs::write(path, s);
+        write_atomic(&path, &s);
     }
 }
 
