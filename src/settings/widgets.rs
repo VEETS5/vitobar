@@ -332,6 +332,29 @@ fn build_nightlight_cmd(config: &crate::config::Config) -> String {
     )
 }
 
+/// Human-readable label for an idle timeout in minutes (0 = "Off").
+fn fmt_minutes(m: u32) -> String {
+    if m == 0 {
+        "Off".into()
+    } else if m < 60 {
+        format!("{} min", m)
+    } else if m % 60 == 0 {
+        format!("{} hr", m / 60)
+    } else {
+        format!("{}h {}m", m / 60, m % 60)
+    }
+}
+
+/// A Selector of preset idle timeouts (values are minutes as strings).
+fn idle_selector(label: &str, key: &'static str, current: u32, presets: &[u32]) -> Widget {
+    let options = presets
+        .iter()
+        .map(|&m| SelectorOption { label: fmt_minutes(m), value: m.to_string(), swatches: None })
+        .collect();
+    let selected = presets.iter().position(|&m| m == current).unwrap_or(usize::MAX);
+    Widget::Selector { label: label.to_string(), options, selected, key }
+}
+
 pub fn build_widgets(cat: Category, config: &crate::config::Config) -> Vec<Widget> {
     match cat {
         Category::Appearance => {
@@ -489,6 +512,27 @@ pub fn build_widgets(cat: Category, config: &crate::config::Config) -> Vec<Widge
                 label: "\u{f186}  Turn Off".into(),
                 cmd:   "pkill wlsunset".into(),
             });
+
+            widgets.push(Widget::SectionHeader { label: "Idle & Power".into() });
+            if command_exists("swayidle") {
+                widgets.push(Widget::InfoRow {
+                    label: "".into(),
+                    value: "Run an action after the system is idle. Changes apply immediately.".into(),
+                });
+            } else {
+                widgets.push(Widget::InfoRow {
+                    label: "".into(),
+                    value: "Install swayidle to enable idle timeouts.".into(),
+                });
+            }
+            widgets.push(idle_selector("Turn off display", "idle_display_off",
+                config.idle_display_off(), &[0, 1, 2, 5, 10, 15, 30]));
+            widgets.push(idle_selector("Auto suspend", "idle_suspend",
+                config.idle_suspend(), &[0, 10, 20, 30, 60, 90, 120]));
+            widgets.push(idle_selector("Auto hibernate", "idle_hibernate",
+                config.idle_hibernate(), &[0, 15, 30, 60, 120, 240]));
+            widgets.push(idle_selector("Auto power off", "idle_poweroff",
+                config.idle_poweroff(), &[0, 30, 60, 120, 240, 480]));
             widgets
         }
 

@@ -49,6 +49,10 @@ pub struct Config {
     pub nightlight_end:   Option<u32>,
     pub latitude:         Option<f32>,
     pub longitude:        Option<f32>,
+    pub idle_display_off: Option<u32>,
+    pub idle_suspend:     Option<u32>,
+    pub idle_hibernate:   Option<u32>,
+    pub idle_poweroff:    Option<u32>,
 }
 
 impl Config {
@@ -60,6 +64,37 @@ impl Config {
     pub fn nightlight_temp(&self)  -> u32  { self.nightlight_temp.unwrap_or(4000).clamp(1000, 6500) }
     pub fn nightlight_start(&self) -> u32  { self.nightlight_start.unwrap_or(20).min(23) }
     pub fn nightlight_end(&self)   -> u32  { self.nightlight_end.unwrap_or(6).min(23) }
+
+    pub fn idle_display_off(&self) -> u32 { self.idle_display_off.unwrap_or(0) }
+    pub fn idle_suspend(&self)     -> u32 { self.idle_suspend.unwrap_or(0) }
+    pub fn idle_hibernate(&self)   -> u32 { self.idle_hibernate.unwrap_or(0) }
+    pub fn idle_poweroff(&self)    -> u32 { self.idle_poweroff.unwrap_or(0) }
+
+    /// Build the `swayidle` invocation for the configured idle timeouts (each
+    /// in minutes; 0 = disabled). Returns None when nothing is enabled. Kills
+    /// any existing swayidle first so it can be re-applied live.
+    pub fn idle_command(&self) -> Option<String> {
+        let mut clauses: Vec<String> = Vec::new();
+        if self.idle_display_off() > 0 {
+            clauses.push(format!(
+                "timeout {} 'niri msg action power-off-monitors' resume 'niri msg action power-on-monitors'",
+                self.idle_display_off() * 60
+            ));
+        }
+        for (mins, action) in [
+            (self.idle_suspend(),   "systemctl suspend"),
+            (self.idle_hibernate(), "systemctl hibernate"),
+            (self.idle_poweroff(),  "systemctl poweroff"),
+        ] {
+            if mins > 0 {
+                clauses.push(format!("timeout {} '{}'", mins * 60, action));
+            }
+        }
+        if clauses.is_empty() {
+            return None;
+        }
+        Some(format!("pkill swayidle; swayidle -w {}", clauses.join(" ")))
+    }
 }
 
 /// Everything that may live in config.toml. All fields optional so a partial
@@ -79,6 +114,10 @@ struct TomlSettings {
     nightlight_end:   Option<u32>,
     latitude:         Option<f32>,
     longitude:        Option<f32>,
+    idle_display_off: Option<u32>,
+    idle_suspend:     Option<u32>,
+    idle_hibernate:   Option<u32>,
+    idle_poweroff:    Option<u32>,
 }
 
 /// A named base16 color scheme selectable in the Appearance tab.
@@ -242,6 +281,10 @@ impl Config {
             nightlight_end:   ts.nightlight_end,
             latitude:         ts.latitude,
             longitude:        ts.longitude,
+            idle_display_off: ts.idle_display_off,
+            idle_suspend:     ts.idle_suspend,
+            idle_hibernate:   ts.idle_hibernate,
+            idle_poweroff:    ts.idle_poweroff,
         }
     }
 }
@@ -279,6 +322,10 @@ impl Default for Config {
             nightlight_end:   None,
             latitude:         None,
             longitude:        None,
+            idle_display_off: None,
+            idle_suspend:     None,
+            idle_hibernate:   None,
+            idle_poweroff:    None,
         }
     }
 }
