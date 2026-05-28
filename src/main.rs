@@ -1853,13 +1853,13 @@ fn main() {
         )
         .expect("clock timer");
 
-    // ── Sysinfo refresh: every 5s (CPU, memory, volume, etc.) ──────────
+    // ── Sysinfo refresh: every 1s (CPU, memory, temps, volume, etc.) ──
     event_loop.handle()
         .insert_source(
-            Timer::from_duration(Duration::from_secs(5)),
+            Timer::from_duration(Duration::from_secs(1)),
             |_, _, app: &mut VitoBar| {
                 app.stats = app.monitor.refresh();
-                TimeoutAction::ToDuration(Duration::from_secs(5))
+                TimeoutAction::ToDuration(Duration::from_secs(1))
             },
         )
         .expect("sysinfo timer");

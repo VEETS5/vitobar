@@ -184,19 +184,24 @@ fn read_hwmon_temp(path: &std::path::Path) -> Option<f32> {
         .filter(|t| *t > 0.0 && *t < 150.0)
 }
 
-/// Read the AMD GPU edge temperature straight from hwmon. When both a discrete
-/// and an integrated AMD GPU are present, prefer the discrete card (it exposes
-/// junction/memory sensors that the integrated Raphael GPU lacks).
+/// Read the AMD GPU temperature straight from hwmon. Prefers junction (Tjunction
+/// / hotspot, temp2_input) over edge (temp1_input) since junction is the hottest
+/// on-die sensor and what determines throttling — it matches what gaming overlays
+/// (HWInfo, MSI Afterburner) display. Falls back to edge on iGPUs that don't
+/// expose junction. When both a discrete and an integrated AMD GPU are present,
+/// prefers the discrete card.
 fn gpu_temp_hwmon() -> Option<f32> {
     let entries = std::fs::read_dir("/sys/class/hwmon").ok()?;
-    let mut best: Option<(bool, f32)> = None; // (is_discrete, edge_temp)
+    let mut best: Option<(bool, f32)> = None; // (is_discrete, temp)
     for entry in entries.flatten() {
         let base = entry.path();
         match std::fs::read_to_string(base.join("name")) {
             Ok(n) if n.trim() == "amdgpu" => {}
             _ => continue,
         }
-        let edge = match read_hwmon_temp(&base.join("temp1_input")) {
+        let temp = match read_hwmon_temp(&base.join("temp2_input"))
+            .or_else(|| read_hwmon_temp(&base.join("temp1_input")))
+        {
             Some(t) => t,
             None => continue,
         };
@@ -204,10 +209,10 @@ fn gpu_temp_hwmon() -> Option<f32> {
             || base.join("temp3_input").exists();
         let better = match best {
             None => true,
-            Some((bd, bt)) => (is_discrete && !bd) || (is_discrete == bd && edge > bt),
+            Some((bd, bt)) => (is_discrete && !bd) || (is_discrete == bd && temp > bt),
         };
         if better {
-            best = Some((is_discrete, edge));
+            best = Some((is_discrete, temp));
         }
     }
     best.map(|(_, t)| t)
