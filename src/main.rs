@@ -11,7 +11,7 @@ use modules::{
     tray::{self, TrayState, TrayDirty, TrayItem},
     widgets::{self, WidgetData, CavaHandle},
 };
-use std::sync::atomic::Ordering;
+use std::sync::atomic::{AtomicBool, Ordering};
 use render::Renderer;
 
 use niri_ipc::{
@@ -51,7 +51,9 @@ enum BarAction {
     FocusWorkspace { id: u64 },
     FocusWindow    { id: u64 },
     Spawn          { cmd: String },
-    SpawnSh        { cmd: String }, // run via `sh -c` (supports args/pipes)
+    MediaToggle    { player: String },
+    WeatherDetails,
+    WeatherRefresh { signal: std::sync::Arc<AtomicBool> },
     // Right-click context menu actions
     CloseWindow    { id: u64 },
     MaximizeColumn,
@@ -95,8 +97,10 @@ fn fire_action(action: BarAction) {
         BarAction::Spawn { cmd } => {
             std::process::Command::new(&cmd).spawn().ok();
         }
-        BarAction::SpawnSh { cmd } => {
-            std::process::Command::new("sh").args(["-c", &cmd]).spawn().ok();
+        BarAction::WeatherDetails => {}
+        BarAction::WeatherRefresh { signal } => { signal.store(true, Ordering::Release); }
+        BarAction::MediaToggle { player } => {
+            std::process::Command::new("playerctl").args(["--player", &player, "play-pause"]).spawn().ok();
         }
         BarAction::CloseWindow { id } => {
             std::thread::spawn(move || {
@@ -176,6 +180,7 @@ const POPUP_HEIGHT:   u32 = POPUP_ITEM_H * POPUP_ITEMS;
 #[derive(Clone)]
 enum PopupKind {
     WindowMenu { window_id: u64 },
+    Weather { lines: Vec<String> },
     TrayMenu   { item: TrayItem, menu_items: Vec<tray::MenuItem> },
 }
 
@@ -409,12 +414,16 @@ fn draw_top_on(
         // icon (may be "") + text block growing leftward; skipped if it would
         // collide with the workspaces.
         macro_rules! lwidget {
-            ($icon:expr, $text:expr, $color:expr, $action:expr) => {{
+            ($icon:expr, $text:expr, $color:expr, $action:expr) => {
+                lwidget!($icon, $text, "", $color, $action)
+            };
+            ($icon:expr, $text:expr, $secondary:expr, $color:expr, $action:expr) => {{
+                let secondary: &str = $secondary;
                 let icon_s: &str = $icon;
                 let text_s: &str = $text;
                 let iw = if icon_s.is_empty() { 0.0 } else { r.measure_text(icon_s, icon_fsz) };
                 let tw = r.measure_text(text_s, fsz);
-                let bw = iw + (if iw > 0.0 { 4.0 * sf } else { 0.0 }) + tw + 10.0 * sf;
+                let bw = iw + (if iw > 0.0 { 4.0 * sf } else { 0.0 }) + tw + r.measure_text(secondary, fsz) + 10.0 * sf;
                 if wx - bw >= ws_end + 4.0 * sf {
                     wx -= bw;
                     r.draw_rect(wx, pad, bw, bh, &config.colors.base01);
@@ -425,6 +434,7 @@ fn draw_top_on(
                         tx += iw + 4.0 * sf;
                     }
                     r.draw_text(text_s, tx, text_y, fsz, $color);
+                    r.draw_text(secondary, tx + tw, text_y, fsz, &config.colors.base04);
                     hits.push(HitRegion { x: wx / sf, y: 2.0, w: bw / sf, h: bh_log, action: $action });
                     wx -= wgap;
                 }
@@ -442,7 +452,7 @@ fn draw_top_on(
             let shown = r.truncate_text(&full, 200.0 * sf, fsz);
             let col = if media.playing { &config.colors.base0b } else { &config.colors.base04 };
             lwidget!(icon, &shown, col,
-                BarAction::SpawnSh { cmd: "playerctl play-pause".into() });
+                BarAction::MediaToggle { player: media.player.clone() });
         }
 
         // Equalizer (cava spectrum)
@@ -478,9 +488,14 @@ fn draw_top_on(
                 let ch = cands.iter().copied().find(|&c| render::glyph_exists(c))
                     .unwrap_or(*cands.last().unwrap());
                 let wicon = ch.to_string();
-                let txt = format!("{}\u{00b0}/{}\u{00b0}", w.hi, w.lo);
-                lwidget!(&wicon, &txt, &config.colors.base0a,
-                    BarAction::Spawn { cmd: "vitosettings".into() });
+                let current = format!("{}°{}{}", w.temp, w.unit, if w.stale { "*" } else { "" });
+                let mut forecast = format!("  ↑{}° ↓{}°", w.hi, w.lo);
+                if r.measure_text(&format!("{current}{forecast}"), fsz) + r.measure_text(&wicon, icon_fsz) + 18.0 * sf > wx - ws_end {
+                    forecast.clear();
+                }
+                lwidget!(&wicon, &current, &forecast, &config.colors.base0a, BarAction::WeatherDetails);
+            } else {
+                lwidget!("", "Weather —", &config.colors.base04, BarAction::WeatherDetails);
             }
         }
 
@@ -885,9 +900,15 @@ impl VitoBar {
             if let Ok(mut g) = self.widget_data.weather_units.lock() {
                 *g = new.weather_units().to_string();
             }
+            if let Ok(mut g) = self.widget_data.weather.lock() { *g = None; }
             self.widget_data.weather_refetch.store(true, Ordering::Release);
         }
 
+        if new.nightlight_command() != self.config.nightlight_command() {
+            if let Some(cmd) = new.nightlight_command() {
+                std::process::Command::new("sh").args(["-c", &cmd]).spawn().ok();
+            }
+        }
         self.config = new;
 
         let eq_now = self.config.widget_equalizer_enabled();
@@ -1052,6 +1073,17 @@ impl VitoBar {
         let mut hits: Vec<HitRegion> = Vec::new();
 
         match kind {
+            PopupKind::Weather { ref lines } => {
+                for (i, line) in lines.iter().enumerate() {
+                    let text = r.truncate_text(line, (POPUP_WIDTH as f32 - 12.0) * sf, fsz);
+                    let color = if i == 0 { &config.colors.base0a } else { &config.colors.base05 };
+                    r.draw_text(&text, 6.0 * sf, (i as f32 * POPUP_ITEM_H as f32 + 15.0) * sf, fsz, color);
+                }
+                let y = lines.len() as f32 * POPUP_ITEM_H as f32;
+                r.draw_text("↻ Refresh weather", 6.0 * sf, (y + 15.0) * sf, fsz, &config.colors.base0d);
+                hits.push(HitRegion { x: 0.0, y, w: POPUP_WIDTH as f32, h: POPUP_ITEM_H as f32,
+                    action: BarAction::WeatherRefresh { signal: self.widget_data.weather_refetch.clone() } });
+            }
             PopupKind::WindowMenu { window_id } => {
                 let items: Vec<(&str, &str, BarAction)> = vec![
                     ("\u{f00d}", " Close",      BarAction::CloseWindow { id: window_id }),
@@ -1343,6 +1375,7 @@ impl PointerHandler for VitoBar {
         use PointerEventKind::*;
 
         let mut popup_action: Option<BarAction> = None;
+        let mut show_weather = None;
         let mut show_popup: Option<(u64, usize, f32)> = None; // (window_id, output_idx, click_x)
         let mut show_tray_menu: Option<(TrayItem, usize, f32)> = None; // (tray_item, output_idx, click_x)
         let mut dismiss_popup = false;
@@ -1423,7 +1456,7 @@ impl PointerHandler for VitoBar {
                 if !is_top && !is_bot { continue; }
 
                 match &event.kind {
-                    Motion { .. } => {
+                    Enter { .. } | Motion { .. } => {
                         if is_top { out.top_pointer_pos = event.position; }
                         if is_bot { out.bot_pointer_pos = event.position; }
                     }
@@ -1437,7 +1470,11 @@ impl PointerHandler for VitoBar {
                         if let Some(hit) = hits.iter().find(|h| {
                             lx >= h.x && lx < h.x + h.w && ly >= h.y && ly < h.y + h.h
                         }) {
-                            fire_action(hit.action.clone());
+                            if matches!(hit.action, BarAction::WeatherDetails) {
+                                show_weather = Some((out_idx, hit.x));
+                            } else {
+                                fire_action(hit.action.clone());
+                            }
                         }
                     }
                     // Right-click on bottom bar → show window context menu
@@ -1473,6 +1510,21 @@ impl PointerHandler for VitoBar {
                 }
                 break;
             }
+        }
+
+        if let Some((idx, x)) = show_weather {
+            let weather = self.widget_data.weather.lock().ok().and_then(|g| g.clone());
+            let lines = if let Some(w) = weather {
+                vec![w.location, w.description, format!("Now {}°{}", w.temp, w.unit),
+                    format!("Feels like {}°{}", w.feels_like, w.unit),
+                    format!("High {}° / Low {}°", w.hi, w.lo),
+                    format!("Fetched {}m ago{}", w.fetched.elapsed().as_secs() / 60, if w.stale { " *" } else { "" }),
+                    if w.stale { "Offline / retrying".into() } else { "Source: wttr.in".into() }]
+            } else {
+                vec![self.config.weather_location().to_string(), "Weather unavailable".into(), "Check location/network".into()]
+            };
+            let count = lines.len() as u32 + 1;
+            self.create_popup(PopupKind::Weather { lines }, idx, count, x, true);
         }
 
         // Apply deferred popup actions
@@ -1627,6 +1679,9 @@ fn main() {
     log::info!("font loaded from: {}", font_path);
 
     let config  = Config::load();
+    if let Some(cmd) = config.nightlight_command() {
+        std::process::Command::new("sh").args(["-c", &cmd]).spawn().ok();
+    }
 
     // Start the idle daemon (display-off / suspend / hibernate / power-off) for
     // the configured timeouts. The command kills any prior swayidle first.

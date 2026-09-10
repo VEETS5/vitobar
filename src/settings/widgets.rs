@@ -323,28 +323,6 @@ fn bt_manager() -> Option<&'static str> {
         .find(|m| command_exists(m))
 }
 
-/// Build the wlsunset invocation for the current night-light config. The
-/// command kills any running instance first so it can be re-applied live.
-fn build_nightlight_cmd(config: &crate::config::Config) -> String {
-    let temp = config.nightlight_temp();
-    if config.nightlight_mode() == "auto" {
-        if let (Some(lat), Some(lon)) = (config.latitude, config.longitude) {
-            return format!(
-                "pkill wlsunset; wlsunset -l {:.4} -L {:.4} -t {} -T 6500",
-                lat, lon, temp
-            );
-        }
-    }
-    // Scheduled (also the fallback when Auto has no location): -s is sunset
-    // (night begins), -S is sunrise (night ends).
-    let start = config.nightlight_start();
-    let end = config.nightlight_end();
-    format!(
-        "pkill wlsunset; wlsunset -S {:02}:00 -s {:02}:00 -t {} -T 6500",
-        end, start, temp
-    )
-}
-
 /// Human-readable label for an idle timeout in minutes (0 = "Off").
 fn fmt_minutes(m: u32) -> String {
     if m == 0 {
@@ -476,8 +454,9 @@ pub fn build_widgets(cat: Category, config: &crate::config::Config) -> Vec<Widge
             let mode_opts = vec![
                 SelectorOption { label: "Scheduled".into(),      value: "scheduled".into(), swatches: None },
                 SelectorOption { label: "Auto (location)".into(), value: "auto".into(),      swatches: None },
+                SelectorOption { label: "Off".into(), value: "off".into(), swatches: None },
             ];
-            let mode_sel = if mode == "auto" { 1 } else { 0 };
+            let mode_sel = if mode == "auto" { 1 } else if mode == "off" { 2 } else { 0 };
 
             let mut widgets = vec![
                 Widget::SectionHeader { label: "Night Light".into() },
@@ -502,7 +481,7 @@ pub fn build_widgets(cat: Category, config: &crate::config::Config) -> Vec<Widge
             if mode == "auto" {
                 let loc = match (config.latitude, config.longitude) {
                     (Some(la), Some(lo)) => format!("{:.3}, {:.3}", la, lo),
-                    _ => "Set latitude/longitude in config.toml".into(),
+                    _ => format!("No coordinates: using {:02}:00–{:02}:00 schedule", config.nightlight_start(), config.nightlight_end()),
                 };
                 widgets.push(Widget::InfoRow { label: "Location".into(), value: loc });
             } else {
@@ -517,13 +496,9 @@ pub fn build_widgets(cat: Category, config: &crate::config::Config) -> Vec<Widge
                     min: 0.0, max: 23.0, key: "nightlight_end",
                 });
             }
-            widgets.push(Widget::Button {
-                label: "\u{f185}  Apply Night Light".into(),
-                cmd:   build_nightlight_cmd(config),
-            });
-            widgets.push(Widget::Button {
-                label: "\u{f186}  Turn Off".into(),
-                cmd:   "pkill wlsunset".into(),
+            widgets.push(Widget::InfoRow {
+                label: "".into(),
+                value: "Changes apply automatically while the bar is running.".into(),
             });
 
             widgets.push(Widget::SectionHeader { label: "Idle & Power".into() });

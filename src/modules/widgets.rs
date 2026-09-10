@@ -3,7 +3,7 @@
 // spectrum, and network throughput. Mirrors the tray.rs threading pattern
 // (Arc<Mutex<…>> + AtomicBool dirty flag) for the async sources.
 
-use std::io::{BufRead, BufReader, Read, Write};
+use std::io::{BufReader, Read, Write};
 use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
@@ -11,8 +11,9 @@ use std::time::{Duration, Instant};
 
 pub type Shared<T> = Arc<Mutex<T>>;
 
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, PartialEq)]
 pub struct MediaInfo {
+    pub player: String,
     pub title:   String,
     pub artist:  String,
     pub playing: bool,
@@ -21,6 +22,13 @@ pub struct MediaInfo {
 
 #[derive(Debug, Clone)]
 pub struct WeatherInfo {
+    pub temp: i32,
+    pub feels_like: i32,
+    pub unit: &'static str,
+    pub location: String,
+    pub description: String,
+    pub fetched: Instant,
+    pub stale: bool,
     pub code: u32, // WWO weather code
     pub hi:   i32,
     pub lo:   i32,
@@ -120,45 +128,42 @@ impl WidgetData {
     }
 }
 
-// ── Media (playerctl --follow) ───────────────────────────────────────────────
+// ── Media: snapshot all players so paused browsers cannot mask playback ──────
+
+fn select_media(output: &str, previous: &str) -> MediaInfo {
+    output.lines().filter_map(|line| {
+        let mut parts = line.splitn(4, '\t');
+        let player = parts.next()?;
+        let status = parts.next()?;
+        let title = parts.next()?.trim();
+        let artist = parts.next()?.trim();
+        if player.is_empty() || title.is_empty() || !matches!(status, "Playing" | "Paused") {
+            return None;
+        }
+        Some(MediaInfo { player: player.into(), title: title.into(), artist: artist.into(),
+            playing: status == "Playing", present: true })
+    }).max_by_key(|m| (m.playing, m.player == previous)).unwrap_or_default()
+}
 
 fn spawn_media(media: Shared<MediaInfo>, dirty: Arc<AtomicBool>) {
-    std::thread::spawn(move || loop {
-        let mut child = match Command::new("playerctl")
-            .args(["--follow", "--format", "{{status}}\t{{title}}\t{{artist}}", "metadata"])
-            .stdout(Stdio::piped())
-            .stderr(Stdio::null())
-            .spawn()
-        {
-            Ok(c) => c,
-            Err(_) => {
-                // playerctl not installed — stop trying.
-                return;
-            }
-        };
-
-        if let Some(out) = child.stdout.take() {
-            for line in BufReader::new(out).lines() {
-                let Ok(line) = line else { break };
-                let mut parts = line.splitn(3, '\t');
-                let status = parts.next().unwrap_or("");
-                let title  = parts.next().unwrap_or("");
-                let artist = parts.next().unwrap_or("");
-                let info = MediaInfo {
-                    title:   title.to_string(),
-                    artist:  artist.to_string(),
-                    playing: status == "Playing",
-                    present: !status.is_empty(),
-                };
-                if let Ok(mut g) = media.lock() { *g = info; }
+    std::thread::spawn(move || {
+        let mut previous = MediaInfo::default();
+        loop {
+            let output = Command::new("timeout")
+                .args(["3", "playerctl", "--all-players", "--format",
+                    "{{playerInstance}}\t{{status}}\t{{title}}\t{{artist}}", "metadata"])
+                .stderr(Stdio::null()).output();
+            let info = match output {
+                Ok(out) if out.status.success() => select_media(&String::from_utf8_lossy(&out.stdout), &previous.player),
+                _ => MediaInfo::default(),
+            };
+            if info != previous {
+                if let Ok(mut g) = media.lock() { *g = info.clone(); }
                 dirty.store(true, Ordering::Release);
+                previous = info;
             }
+            std::thread::sleep(Duration::from_secs(2));
         }
-        let _ = child.wait();
-        // Player went away: clear and retry after a pause.
-        if let Ok(mut g) = media.lock() { *g = MediaInfo::default(); }
-        dirty.store(true, Ordering::Release);
-        std::thread::sleep(Duration::from_secs(3));
     });
 }
 
@@ -173,18 +178,32 @@ fn spawn_weather(
 ) {
     std::thread::spawn(move || {
         let mut last_fetch = Instant::now() - Duration::from_secs(3600);
+        let mut retry = Duration::from_secs(600);
         loop {
             let due = refetch.swap(false, Ordering::Acquire)
-                || last_fetch.elapsed() >= Duration::from_secs(900);
+                || last_fetch.elapsed() >= retry;
             if due {
                 let location = loc.lock().map(|g| g.clone()).unwrap_or_default();
                 let unit = units.lock().map(|g| g.clone()).unwrap_or_else(|_| "C".into());
                 last_fetch = Instant::now();
+                retry = Duration::from_secs(600);
                 if location.trim().is_empty() {
                     if let Ok(mut g) = weather.lock() { *g = None; }
                     dirty.store(true, Ordering::Release);
                 } else if let Some(info) = fetch_weather(&location, &unit) {
+                    // Ignore an in-flight response for settings that have since changed.
+                    let current_loc = loc.lock().ok();
+                    let current_units = units.lock().ok();
+                    if current_loc.as_deref() != Some(&location) || current_units.as_deref() != Some(&unit) {
+                        continue;
+                    }
                     if let Ok(mut g) = weather.lock() { *g = Some(info); }
+                    dirty.store(true, Ordering::Release);
+                } else {
+                    retry = Duration::from_secs(60);
+                    if let Ok(mut g) = weather.lock() {
+                        if let Some(info) = g.as_mut() { info.stale = true; }
+                    }
                     dirty.store(true, Ordering::Release);
                 }
             }
@@ -194,16 +213,22 @@ fn spawn_weather(
 }
 
 fn fetch_weather(location: &str, units: &str) -> Option<WeatherInfo> {
-    let loc_enc = location.trim().replace(' ', "+");
-    let url = format!("wttr.in/{}?format=j1", loc_enc);
+    // Encode the path component, including punctuation, without allowing URL options.
+    let loc_enc: String = location.trim().bytes().map(|b| {
+        if b.is_ascii_alphanumeric() || b"-._~".contains(&b) { (b as char).to_string() }
+        else { format!("%{b:02X}") }
+    }).collect();
+    let url = format!("https://wttr.in/{loc_enc}?format=j1");
     let out = Command::new("curl")
-        .args(["-s", "--max-time", "15", &url])
-        .output()
-        .ok()?;
-    if !out.status.success() {
-        return None;
-    }
+        .args(["--fail", "--silent", "--show-error", "--globoff", "--max-time", "15", &url])
+        .output().ok()?;
+    if !out.status.success() { return None; }
     let v: serde_json::Value = serde_json::from_slice(&out.stdout).ok()?;
+    parse_weather(&v, units)
+}
+
+fn parse_weather(v: &serde_json::Value, units: &str) -> Option<WeatherInfo> {
+    let v = v.get("data").unwrap_or(v);
     let code = v["current_condition"][0]["weatherCode"]
         .as_str()?
         .parse::<u32>()
@@ -216,7 +241,14 @@ fn fetch_weather(location: &str, units: &str) -> Option<WeatherInfo> {
     };
     let hi = w0[hi_key].as_str()?.parse::<i32>().ok()?;
     let lo = w0[lo_key].as_str()?.parse::<i32>().ok()?;
-    Some(WeatherInfo { code, hi, lo })
+    let unit = if units.eq_ignore_ascii_case("F") { "F" } else { "C" };
+    let current = &v["current_condition"][0];
+    let temp = current[format!("temp_{unit}")].as_str()?.parse().ok()?;
+    let feels_like = current[format!("FeelsLike{unit}")].as_str()?.parse().ok()?;
+    Some(WeatherInfo { code, hi, lo, temp, feels_like, unit,
+        location: v["nearest_area"][0]["areaName"][0]["value"].as_str().unwrap_or("").trim().into(),
+        description: current["weatherDesc"][0]["value"].as_str().unwrap_or("").trim().into(),
+        fetched: Instant::now(), stale: false })
 }
 
 /// Nerd Font glyph candidates (first that the font has wins) for a WWO weather
@@ -314,4 +346,39 @@ pub fn start_cava(bars: usize, out: Shared<Vec<u8>>) -> Option<CavaHandle> {
     });
 
     Some(CavaHandle { child, stop })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn media_prefers_playing_and_keeps_controls_on_the_same_instance() {
+        let output = "firefox.instance1\tPaused\tOld video\tChannel\nspotify\tPlaying\tSong\tArtist";
+        let selected = select_media(output, "firefox.instance1");
+        assert_eq!(selected.player, "spotify");
+        assert_eq!(selected.title, "Song");
+        assert!(selected.playing);
+        let both = output.replace("Paused", "Playing");
+        assert_eq!(select_media(&both, "firefox.instance1").player, "firefox.instance1");
+        assert!(!select_media("spotify\tStopped\tOld song\tArtist", "spotify").present);
+        assert!(!select_media("", "spotify").present);
+        assert!(!select_media("broken row", "").present);
+    }
+
+    #[test]
+    fn weather_uses_current_temperature_in_requested_units() {
+        let v = serde_json::json!({
+            "current_condition": [{"weatherCode":"113", "temp_F":"72", "temp_C":"22",
+                "FeelsLikeF":"70", "FeelsLikeC":"21", "weatherDesc":[{"value":"Clear"}]}],
+            "weather": [{"maxtempF":"85", "mintempF":"60", "maxtempC":"29", "mintempC":"16"}],
+            "nearest_area": [{"areaName":[{"value":"Park Ridge"}]}]
+        });
+        let f = parse_weather(&v, "f").unwrap();
+        assert_eq!((f.temp, f.feels_like, f.hi, f.lo, f.unit), (72, 70, 85, 60, "F"));
+        assert_eq!(f.location, "Park Ridge");
+        let c = parse_weather(&serde_json::json!({"data":v}), "C").unwrap();
+        assert_eq!((c.temp, c.hi, c.lo), (22, 29, 16));
+        assert!(parse_weather(&serde_json::json!({}), "F").is_none());
+    }
 }
