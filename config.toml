@@ -5,7 +5,7 @@ idle_display_off = 0
 idle_hibernate = 0
 idle_suspend = 0
 nightlight_end = 6
-nightlight_mode = "scheduled"
+nightlight_mode = "auto"
 nightlight_start = 19
 nightlight_temp = 4080
 taskbar_height = 21
@@ -14,3 +14,7 @@ weather_units = "F"
 widget_equalizer_enabled = false
 widget_media_enabled = true
 widget_weather_enabled = true
+
+# Park Ridge coordinates, resolved from the configured weather ZIP.
+latitude = 42.011
+longitude = -87.841

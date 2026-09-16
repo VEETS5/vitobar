@@ -72,6 +72,22 @@ impl Config {
     pub fn nightlight_start(&self) -> u32  { self.nightlight_start.unwrap_or(20).min(23) }
     pub fn nightlight_end(&self)   -> u32  { self.nightlight_end.unwrap_or(6).min(23) }
 
+    /// Shared by startup and live reload. An unset mode leaves nightlight unmanaged.
+    pub fn nightlight_command(&self) -> Option<String> {
+        if self.nightlight_mode.is_none() { return None; }
+        if self.nightlight_mode() == "off" { return Some("pkill -x wlsunset".into()); }
+        let temp = self.nightlight_temp().min(6499);
+        if self.nightlight_mode() == "auto" {
+            if let (Some(lat), Some(lon)) = (self.latitude, self.longitude) {
+                if lat.is_finite() && lon.is_finite() && lat.abs() <= 90.0 && lon.abs() <= 180.0 {
+                    return Some(format!("pkill -x wlsunset; exec wlsunset -l {lat:.4} -L {lon:.4} -t {temp} -T 6500"));
+                }
+            }
+        }
+        Some(format!("pkill -x wlsunset; exec wlsunset -S {:02}:00 -s {:02}:00 -t {temp} -T 6500",
+            self.nightlight_end(), self.nightlight_start()))
+    }
+
     pub fn idle_display_off(&self) -> u32 { self.idle_display_off.unwrap_or(0) }
     pub fn idle_suspend(&self)     -> u32 { self.idle_suspend.unwrap_or(0) }
     pub fn idle_hibernate(&self)   -> u32 { self.idle_hibernate.unwrap_or(0) }
@@ -431,6 +447,24 @@ mod tests {
     use super::*;
 
     #[test]
+    fn nightlight_startup_modes_and_fallback() {
+        let mut c = Config::default();
+        assert!(c.nightlight_command().is_none());
+        c.nightlight_mode = Some("auto".into());
+        assert!(c.nightlight_command().unwrap().contains("-S 06:00 -s 20:00"));
+        c.latitude = Some(42.011);
+        c.longitude = Some(-87.841);
+        assert!(c.nightlight_command().unwrap().contains("-l 42.0110 -L -87.8410"));
+        c.latitude = Some(f32::NAN);
+        assert!(c.nightlight_command().unwrap().contains("-S 06:00"));
+        c.nightlight_temp = Some(6500);
+        assert!(c.nightlight_command().unwrap().contains("-t 6499 -T 6500"));
+        c.nightlight_mode = Some("off".into());
+        assert_eq!(c.nightlight_command().unwrap(), "pkill -x wlsunset");
+        assert_eq!(hex_to_rgba("☀abc"), (0, 0, 0, 255));
+    }
+
+    #[test]
     fn bundled_themes_all_parse() {
         let themes = bundled_themes();
         assert_eq!(themes.len(), 10, "all bundled scheme files should parse");
@@ -445,7 +479,7 @@ mod tests {
 /// Parse a hex color string like "1e1e2e" into (r, g, b, a)
 pub fn hex_to_rgba(hex: &str) -> (u8, u8, u8, u8) {
     let hex = hex.trim_start_matches('#');
-    if hex.len() < 6 {
+    if hex.len() < 6 || !hex.is_ascii() {
         return (0, 0, 0, 255);
     }
     let r = u8::from_str_radix(&hex[0..2], 16).unwrap_or(0);
